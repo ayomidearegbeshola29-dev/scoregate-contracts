@@ -1,6 +1,6 @@
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     vec, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
@@ -3145,7 +3145,7 @@ fn test_contagion_boosts_linked_wallets() {
     client.add_counterparty_link(&anchor, &counterparty, &asset_pair);
 
     // Propagate contagion with boost of 30
-    let affected = client.propagate_contagion(&anchor, &asset_pair, &30);
+    let affected = client.propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &30);
 
     assert_eq!(affected, 1);
 
@@ -3180,7 +3180,7 @@ fn test_contagion_boost_capped_at_100() {
     client.add_counterparty_link(&anchor, &counterparty, &asset_pair);
 
     // Propagate contagion with boost of 30 (should cap at 100)
-    let affected = client.propagate_contagion(&anchor, &asset_pair, &30);
+    let affected = client.propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &30);
 
     assert_eq!(affected, 1);
 
@@ -3203,7 +3203,7 @@ fn test_contagion_missing_score_treated_as_zero() {
     client.add_counterparty_link(&anchor, &counterparty, &asset_pair);
 
     // Propagate contagion with boost of 50
-    let affected = client.propagate_contagion(&anchor, &asset_pair, &50);
+    let affected = client.propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &50);
 
     assert_eq!(affected, 1);
 
@@ -3272,7 +3272,7 @@ fn test_contagion_events_per_affected_wallet() {
         &None,
     );
 
-    let affected = client.propagate_contagion(&anchor, &asset_pair, &40);
+    let affected = client.propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &40);
 
     assert_eq!(affected, 2);
 
@@ -3320,7 +3320,7 @@ fn test_contagion_does_not_affect_unlinked_wallets() {
         &None,
     );
 
-    let affected = client.propagate_contagion(&anchor, &asset_pair, &50);
+    let affected = client.propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &50);
 
     assert_eq!(affected, 1);
 
@@ -3359,11 +3359,89 @@ fn test_contagion_bypasses_rate_limits() {
     assert_eq!(initial_score.score, 30);
 
     // Contagion propagation works regardless of cooldown
-    let affected = client.propagate_contagion(&anchor, &asset_pair, &40);
+    let affected = client.propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &40);
     assert_eq!(affected, 1);
 
     let score = client.get_score(&counterparty, &asset_pair);
     assert_eq!(score.score, 70); // 30 + 40, despite cooldown not having elapsed
+}
+
+#[test]
+#[should_panic]
+fn test_propagate_contagion_requires_admin_auth() {
+    // Issue #55: `propagate_contagion` must not be publicly callable by anyone.
+    // No admin multisig is configured, so `require_admin_auth` falls back to
+    // `storage::get_admin(env).require_auth()`. We mock no addresses at all
+    // for this call (not even the admin), so that fallback panics if it is
+    // genuinely reached, proving the auth check is real and not bypassed.
+    let (env, client, _admin, _service) = initialized();
+
+    let anchor = Address::generate(&env);
+    let counterparty = Address::generate(&env);
+    let asset_pair = symbol_short!("XLM_USDC");
+    client.add_counterparty_link(&anchor, &counterparty, &asset_pair);
+
+    let admin_signers: Vec<Address> = Vec::new(&env);
+    client
+        .mock_auths(&[])
+        .propagate_contagion(&admin_signers, &anchor, &asset_pair, &30);
+}
+
+#[test]
+fn test_propagate_contagion_insufficient_admin_signers_rejected() {
+    // With a real admin multisig configured (threshold 2), passing only 1
+    // signer must be rejected structurally, before any auth is even checked.
+    let (env, client, admin, service) = setup();
+    client.initialize(&admin, &service);
+
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    client.add_admin_signer(&Vec::new(&env), &s1);
+    client.add_admin_signer(&Vec::new(&env), &s2);
+    client.set_admin_threshold(&Vec::new(&env), &2);
+
+    let anchor = Address::generate(&env);
+    let asset_pair = symbol_short!("XLM_USDC");
+
+    let mut one_signer: Vec<Address> = Vec::new(&env);
+    one_signer.push_back(s1);
+    let result = client.try_propagate_contagion(&one_signer, &anchor, &asset_pair, &30);
+    assert_eq!(result, Err(Ok(Error::InsufficientAdminSigners)));
+}
+
+#[test]
+fn test_propagate_contagion_boost_over_ceiling_rejected() {
+    // Issue #55: an unbounded boost must be rejected regardless of who calls it.
+    let (env, client, _admin, _service) = initialized();
+
+    let anchor = Address::generate(&env);
+    let counterparty = Address::generate(&env);
+    let asset_pair = symbol_short!("XLM_USDC");
+    client.add_counterparty_link(&anchor, &counterparty, &asset_pair);
+
+    let result = client.try_propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &51);
+    assert_eq!(result, Err(Ok(Error::InvalidBoost)));
+
+    // Exactly at the ceiling is still accepted.
+    let affected = client.propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &50);
+    assert_eq!(affected, 1);
+    let score = client.get_score(&counterparty, &asset_pair);
+    assert_eq!(score.score, 50); // no prior score (treated as 0) + boost of 50
+}
+
+#[test]
+fn test_propagate_contagion_rejected_while_paused() {
+    let (env, client, _admin, _service) = initialized();
+
+    let anchor = Address::generate(&env);
+    let counterparty = Address::generate(&env);
+    let asset_pair = symbol_short!("XLM_USDC");
+    client.add_counterparty_link(&anchor, &counterparty, &asset_pair);
+
+    client.pause(&Vec::new(&env));
+
+    let result = client.try_propagate_contagion(&Vec::new(&env), &anchor, &asset_pair, &30);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
 }
 
 #[test]
@@ -3424,6 +3502,58 @@ fn test_remove_nonexistent_link_fails() {
 
     let result = client.try_remove_counterparty_link(&wallet_a, &wallet_b, &asset_pair);
     assert_eq!(result, Err(Ok(Error::CounterpartyLinkFull)));
+}
+
+#[test]
+#[should_panic]
+fn test_add_counterparty_link_requires_both_wallets_auth() {
+    // Issue #54: `add_counterparty_link` had no caller authorization at all,
+    // meaning anyone could link two arbitrary wallets together. We mock only
+    // wallet_a's authorization for this specific invocation (not wallet_b's),
+    // so wallet_b.require_auth() must panic if it is genuinely reached.
+    let (env, client, _admin, _service) = initialized();
+
+    let wallet_a = Address::generate(&env);
+    let wallet_b = Address::generate(&env);
+    let asset_pair = symbol_short!("XLM_USDC");
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &wallet_a,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "add_counterparty_link",
+                args: (wallet_a.clone(), wallet_b.clone(), asset_pair.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .add_counterparty_link(&wallet_a, &wallet_b, &asset_pair);
+}
+
+#[test]
+#[should_panic]
+fn test_remove_counterparty_link_requires_both_wallets_auth() {
+    // Same gap as add_counterparty_link (Issue #54): only wallet_a's auth is
+    // mocked, so wallet_b.require_auth() must panic if genuinely enforced.
+    let (env, client, _admin, _service) = initialized();
+
+    let wallet_a = Address::generate(&env);
+    let wallet_b = Address::generate(&env);
+    let asset_pair = symbol_short!("XLM_USDC");
+
+    client.add_counterparty_link(&wallet_a, &wallet_b, &asset_pair);
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &wallet_a,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "remove_counterparty_link",
+                args: (wallet_a.clone(), wallet_b.clone(), asset_pair.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .remove_counterparty_link(&wallet_a, &wallet_b, &asset_pair);
 }
 
 // ── get_score_variance tests ──────────────────────────────────────────────────

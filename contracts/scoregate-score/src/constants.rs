@@ -178,6 +178,11 @@ pub const DEFAULT_PARAM_CHANGE_DELAY_SECS: u64 = 86_400;
 /// Maximum number of entries retained in the rate-limit override audit log.
 pub const MAX_RATE_LIMIT_OVERRIDE_LOG: u32 = 100;
 
+/// Sanity ceiling on the per-call score boost `propagate_contagion` may
+/// apply to a counterparty. Bounds how much damage a single authorized call
+/// can do even under a compromised/misbehaving admin signer set. (Issue #55)
+pub const MAX_CONTAGION_BOOST: u32 = 50;
+
 /// Operator-facing manifest fields that the drift checker treats as the
 /// stable configuration surface for deployed instances.
 pub const CONFIG_DRIFT_MANIFEST_FIELDS: &[&str] = &[
