@@ -14,6 +14,8 @@
 //! of the ScoreGate gate so a stale-but-safe score cannot bypass a high-value
 //! action during detection lag.
 
+mod events;
+
 use scoregate_score::ScoreGateScoreContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
@@ -48,6 +50,8 @@ pub enum MockAmmError {
     UnsupportedVersion = 7,
     /// Caller is not the configured fixture admin.
     Unauthorized = 8,
+    /// A gate threshold or confidence floor exceeds the valid 0-100 scale.
+    InvalidThreshold = 9,
 }
 
 #[contracttype]
@@ -73,8 +77,16 @@ impl MockAmm {
     /// One-time wiring: record the ScoreGate deployment, admin, version
     /// expectation, bounded freshness window, and failure policy enforced by
     /// this SDK conformance fixture.
-    pub fn initialize(env: Env, admin: Address, scoregate: Address, gate_threshold: u32) {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        scoregate: Address,
+        gate_threshold: u32,
+    ) -> Result<(), MockAmmError> {
         admin.require_auth();
+        if gate_threshold > 100 {
+            return Err(MockAmmError::InvalidThreshold);
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::ScoreGate, &scoregate);
         env.storage().instance().set(&DataKey::GateThreshold, &gate_threshold);
@@ -84,6 +96,7 @@ impl MockAmm {
         env.storage().instance().set(&DataKey::RequiredOracleVersion, &0u32);
         let expanded_score = Self::oracle_has_expanded_score(&env, &scoregate);
         env.storage().instance().set(&DataKey::ExpandedRiskScore, &expanded_score);
+        Ok(())
     }
 
     /// Register or rotate the ScoreGate oracle this AMM consults for gate checks.
@@ -92,7 +105,26 @@ impl MockAmm {
         env.storage().instance().set(&DataKey::ScoreGate, &oracle);
         let expanded_score = Self::oracle_has_expanded_score(&env, &oracle);
         env.storage().instance().set(&DataKey::ExpandedRiskScore, &expanded_score);
+        events::oracle_updated(&env, &oracle);
         Ok(())
+    }
+
+    /// Re-probe the *currently configured* oracle's capabilities without
+    /// changing its address. Needed when the oracle contract is upgraded in
+    /// place (redeployed at the same address) — `set_risk_oracle` re-probes
+    /// on an address change, but nothing previously re-probed a same-address
+    /// upgrade. (Issue #120)
+    pub fn refresh_oracle_capabilities(env: Env, admin: Address) -> Result<bool, MockAmmError> {
+        Self::require_admin(&env, &admin)?;
+        let scoregate: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ScoreGate)
+            .ok_or(MockAmmError::NotConfigured)?;
+        let expanded_score = Self::oracle_has_expanded_score(&env, &scoregate);
+        env.storage().instance().set(&DataKey::ExpandedRiskScore, &expanded_score);
+        events::capabilities_refreshed(&env, expanded_score);
+        Ok(expanded_score)
     }
 
     /// Configure the score and confidence floors enforced by
@@ -107,11 +139,15 @@ impl MockAmm {
         required_oracle_version: u32,
     ) -> Result<(), MockAmmError> {
         Self::require_admin(&env, &admin)?;
+        if gate_threshold > 100 || min_confidence > 100 {
+            return Err(MockAmmError::InvalidThreshold);
+        }
         env.storage().instance().set(&DataKey::GateThreshold, &gate_threshold);
         env.storage().instance().set(&DataKey::MinConfidence, &min_confidence);
         env.storage().instance().set(&DataKey::FailPolicy, &fail_policy);
         env.storage().instance().set(&DataKey::MaxStalenessSecs, &max_staleness_secs);
         env.storage().instance().set(&DataKey::RequiredOracleVersion, &required_oracle_version);
+        events::gate_config_updated(&env, gate_threshold, min_confidence);
         Ok(())
     }
 
@@ -216,6 +252,7 @@ impl MockAmm {
             }
         }
 
+        events::swap_executed(&env, &user, &asset_pair, amount);
         Ok(())
     }
 
@@ -287,6 +324,7 @@ impl MockAmm {
             }
         }
 
+        events::liquidity_provided(&env, &provider, amount);
         Ok(())
     }
 }

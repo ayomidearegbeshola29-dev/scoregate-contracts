@@ -455,8 +455,8 @@ fn direct_score_consumer_gate_stays_bounded_and_has_no_persistent_side_effect() 
     );
     assert_eq!(
         fixture.env.events().all().len(),
-        event_count_before,
-        "successful gate emits no events"
+        event_count_before + 1,
+        "swap emits exactly its own swap_executed audit event (Issue #119); the underlying gate check itself remains side-effect-free"
     );
     assert_eq!(
         total_entries_after, total_entries_before,
@@ -487,7 +487,11 @@ fn delegated_consumer_gate_is_the_bounded_read_only_worst_case() {
     );
 
     assert_eq!(persistent_entries(&fixture.env), persistent_before);
-    assert_eq!(fixture.env.events().all().len(), event_count_before);
+    assert_eq!(
+        fixture.env.events().all().len(),
+        event_count_before + 1,
+        "swap emits exactly its own swap_executed audit event (Issue #119)"
+    );
     assert_eq!(total_entries_after, total_entries_before);
 }
 
@@ -511,6 +515,10 @@ fn silence_transition_has_bounded_resource_write_and_event_behavior() {
     let (cpu, memory) = assert_gate_budget("historical silence-transition AMM gate", &fixture.env);
     let events_after = fixture.env.events().all();
     let total_entries_after = fixture.env.to_ledger_snapshot().ledger_entries.len();
+    // Two new events on this swap: ScoreGate's own silence-transition alert
+    // (published first, from inside the cross-contract call), then this
+    // mock's own swap_executed audit event (Issue #119), published last,
+    // after the gate check succeeds.
     let (_, topics, data) =
         events_after.get(events_before.len()).expect("silence transition must emit one event");
     let event_bytes = event_payload_bytes(&fixture.env, &topics, &data);
@@ -520,7 +528,7 @@ fn silence_transition_has_bounded_resource_write_and_event_behavior() {
         total_entries_after as i64 - total_entries_before as i64
     );
 
-    assert_eq!(events_after.len(), events_before.len() + 1);
+    assert_eq!(events_after.len(), events_before.len() + 2);
     assert!(
         event_bytes <= MAX_SILENCE_EVENT_PAYLOAD_BYTES,
         "silence event payload regression: {event_bytes} > {MAX_SILENCE_EVENT_PAYLOAD_BYTES}"
@@ -540,6 +548,9 @@ fn silence_transition_has_bounded_resource_write_and_event_behavior() {
     fixture.env.budget().reset_tracker();
     assert_eq!(fixture.amm.try_swap(&wallet, &symbol_short!("XLM_USDC"), &i128::MAX), Ok(Ok(())));
     assert_gate_budget("historical repeated-silence AMM gate", &fixture.env);
-    assert_eq!(fixture.env.events().all().len(), events_after.len());
+    // The silence flag is now already set, so ScoreGate doesn't re-emit its
+    // one-shot alert on this repeat swap — but this mock's own
+    // swap_executed event still fires on every successful swap.
+    assert_eq!(fixture.env.events().all().len(), events_after.len() + 1);
     assert_eq!(persistent_entries(&fixture.env), persistent_after_transition);
 }
