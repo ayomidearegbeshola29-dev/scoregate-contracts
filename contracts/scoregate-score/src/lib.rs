@@ -519,6 +519,7 @@ impl ScoreGateScoreContract {
                 if ta.participating_signers.len() < threshold {
                     return Err(Error::InsufficientSigners);
                 }
+                Self::validate_unique_signers(&ta.participating_signers)?;
                 for i in 0..ta.participating_signers.len() {
                     let signer = ta.participating_signers.get(i).unwrap();
                     if !service_set.contains(&signer) {
@@ -546,6 +547,7 @@ impl ScoreGateScoreContract {
                 && threshold > 0
                 && !(signers.len() == 1 && signers.get(0).unwrap() == storage::get_service(&env))
             {
+                Self::validate_unique_signers(&signers)?;
                 if signers.len() < threshold {
                     return Err(Error::InsufficientSigners);
                 }
@@ -1760,6 +1762,7 @@ impl ScoreGateScoreContract {
         let threshold = storage::get_service_threshold(&env);
 
         if !service_set.is_empty() && threshold > 0 {
+            Self::validate_unique_signers(&signers)?;
             if signers.len() < threshold {
                 return Err(Error::InsufficientSigners);
             }
@@ -1886,7 +1889,9 @@ impl ScoreGateScoreContract {
                         rejection_code = Error::ModelVersionNotRegistered as u32;
                     }
                 }
-            } else {
+            }
+
+            if rejection_code == 0 {
                 let last_submit = storage::get_last_submit_time(&env, &sub.wallet, &sub.asset_pair);
                 let base_cooldown = storage::get_pair_cooldown_secs(&env, &sub.asset_pair);
                 let cooldown =
@@ -5073,7 +5078,7 @@ impl ScoreGateScoreContract {
         Self::check_service_silence(&env);
         // #302: strict gate enforcement — reject callers not in the allowlist.
         if storage::get_gate_enforcement_mode(&env) {
-            let caller = env.current_contract_address();
+            let caller = env.invoker();
             let callers = storage::get_gate_callers(&env);
             if !callers.contains(&caller) {
                 return false; // CallerNotAuthorized: infallible, so return false
@@ -7332,7 +7337,11 @@ impl ScoreGateScoreContract {
             return Err(Error::ParameterProposalVetoPeriodEnded);
         }
 
-        let vetoer = service_signers.get(0).unwrap();
+        let vetoer = if service_signers.is_empty() {
+            storage::get_service(&env)
+        } else {
+            service_signers.get(0).unwrap()
+        };
         storage::mark_parameter_proposal_status(&env, proposal_id, ParameterProposalStatus::Vetoed);
         events::parameter_change_vetoed(&env, proposal_id, &vetoer);
         Ok(())
@@ -11248,6 +11257,7 @@ impl ScoreGateScoreContract {
         let threshold = storage::get_service_threshold(env);
 
         if !service_set.is_empty() && threshold > 0 {
+            Self::validate_unique_signers(signers)?;
             if signers.len() < threshold {
                 return Err(Error::InsufficientSigners);
             }
@@ -11953,10 +11963,24 @@ impl ScoreGateScoreContract {
     /// `threshold` addresses, each a member of the admin set, and calls
     /// `require_auth()` on each. In legacy mode falls back to the single
     /// stored admin key.
+    fn validate_unique_signers(signers: &Vec<Address>) -> Result<(), Error> {
+        for i in 0..signers.len() {
+            let lhs = signers.get(i).unwrap();
+            for j in (i + 1)..signers.len() {
+                let rhs = signers.get(j).unwrap();
+                if lhs == rhs {
+                    return Err(Error::Unauthorized);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn require_admin_auth(env: &Env, admin_signers: &Vec<Address>) -> Result<(), Error> {
         let admin_set = storage::get_admin_set(env);
         let threshold = storage::get_admin_threshold(env);
         if !admin_set.is_empty() && threshold > 0 {
+            Self::validate_unique_signers(admin_signers)?;
             if admin_signers.len() < threshold {
                 return Err(Error::InsufficientAdminSigners);
             }
@@ -11987,6 +12011,7 @@ impl ScoreGateScoreContract {
         let service_set = storage::get_service_set(env);
         let threshold = storage::get_service_threshold(env);
         if !service_set.is_empty() && threshold > 0 {
+            Self::validate_unique_signers(service_signers)?;
             if service_signers.len() < threshold {
                 return Err(Error::InsufficientSigners);
             }

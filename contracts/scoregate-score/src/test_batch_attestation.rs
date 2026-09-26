@@ -774,6 +774,68 @@ fn test_batch_attested_contract_paused_rejected() {
     assert_eq!(result, Err(Ok(Error::ContractPaused)));
 }
 
+#[test]
+fn test_batch_attested_active_model_version_persists_and_emits_score_event() {
+    let (env, client, _admin, _service) = initialized();
+    let key = signing_key(7);
+    client.set_service_pubkey(&Vec::new(&env), &pubkey_bytes(&env, &key, true));
+
+    let version = 7u32;
+    client.register_model_version(&Vec::new(&env), &version);
+
+    let wallet = Address::generate(&env);
+    let pair = symbol_short!("XLM_USDC");
+    let submission = ScoreSubmission {
+        wallet: wallet.clone(),
+        asset_pair: pair.clone(),
+        score: 42,
+        benford_flag: false,
+        ml_flag: false,
+        timestamp: 1_700_000_001,
+        confidence: 90,
+        model_version: version,
+    };
+    let payload = payload_commitment(
+        &env,
+        &client.address,
+        &wallet,
+        &pair,
+        42,
+        false,
+        false,
+        1_700_000_001,
+        90,
+        version,
+    );
+    let root = build_merkle_root(&env, &[merkle_leaf(&env, &payload)]);
+    let attestation = attest(&env, &key, &root);
+
+    let mut submissions: Vec<ScoreSubmissionWithProof> = Vec::new(&env);
+    submissions.push_back(ScoreSubmissionWithProof {
+        submission,
+        proof: Vec::new(&env),
+        proof_flags: 0,
+    });
+
+    let result = client.submit_scores_batch_attested(&Vec::new(&env), &submissions, &attestation);
+    assert_eq!(result.accepted_count, 1);
+    assert_eq!(result.rejected_count, 0);
+    assert!(result.results.get(0).unwrap().accepted);
+
+    let score = client.get_score(&wallet, &pair);
+    assert_eq!(score.score, 42);
+    assert_eq!(score.model_version, version);
+
+    let topic = (symbol_short!("score"), 1u32, wallet.clone(), pair.clone());
+    let event_found = env.events().all().iter().any(|(addr, topics, data)| {
+        *addr == client.address
+            && *topics == topic.clone().into_val(&env)
+            && matches!(data.into_val::<(u32, bool, bool, u32, u64)>(&env), (score, _, _, _, _)
+                if score == 42)
+    });
+    assert!(event_found, "score_submitted event was not emitted for an active model version");
+}
+
 // ── Marker type alias to silence "unused import" warning for ScoreAttestation
 // (kept for symmetry with test_attestation.rs and in case future helpers
 // want to construct a per-entry attestation for cross-checks). ────────────

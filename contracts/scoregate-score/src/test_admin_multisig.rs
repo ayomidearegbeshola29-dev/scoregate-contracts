@@ -219,6 +219,20 @@ fn test_require_admin_auth_signer_not_in_set() {
     assert_eq!(result, Err(Ok(Error::AdminSignerNotInSet)));
 }
 
+#[test]
+fn test_require_admin_auth_duplicate_signers_rejected() {
+    let (env, client, _admin, _service) = setup();
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    client.add_admin_signer(&Vec::new(&env), &s1);
+    client.add_admin_signer(&Vec::new(&env), &s2);
+    client.set_admin_threshold(&Vec::new(&env), &2);
+
+    let dup_signers = signers_vec(&env, &[s1.clone(), s1.clone()]);
+    let result = client.try_set_risk_threshold(&dup_signers, &60);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
 // ── 9. Remove signer auto-adjusts threshold ───────────────────────────────────
 
 #[test]

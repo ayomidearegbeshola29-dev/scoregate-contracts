@@ -201,6 +201,31 @@ fn test_ttl_zero_disables_check() {
 }
 
 #[test]
+fn test_duplicate_service_signers_rejected_as_unauthorized() {
+    let (env, client, _admin, _service) = setup();
+    let signer = Address::generate(&env);
+    let empty_signers: Vec<Address> = Vec::new(&env);
+    client.add_service_signer(&empty_signers, &signer);
+    client.set_service_threshold(&empty_signers, &2);
+
+    let dup_signers = Vec::from_array(&env, [signer.clone(), signer.clone()]);
+    let wallet = Address::generate(&env);
+    let result = client.try_submit_score(
+        &dup_signers,
+        &wallet,
+        &symbol_short!("XLM_USDC"),
+        &42,
+        &false,
+        &false,
+        &1_700_000_000,
+        &90,
+        &1,
+        &None,
+    );
+    assert_eq!(result, Err(Ok(crate::Error::Unauthorized)));
+}
+
+#[test]
 fn test_set_signer_rotation_grace() {
     let (env, client, _admin, _service) = setup();
     let empty_signers: Vec<Address> = Vec::new(&env);
