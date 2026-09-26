@@ -66,6 +66,28 @@ fn test_strict_mode_unlisted_caller_returns_false() {
     assert!(!result, "unlisted caller must be rejected in strict mode");
 }
 
+#[test]
+fn test_strict_mode_allows_allowlisted_external_contract() {
+    let (env, client) = setup();
+    let wallet = Address::generate(&env);
+    submit_score(&env, &client, &wallet, 50);
+
+    let external = Address::generate(&env);
+    client.set_gate_callers(&Vec::new(&env), &Vec::from_array(&env, [external.clone()]));
+    client.set_gate_enforcement_mode(&Vec::new(&env), &true);
+
+    env.as_contract(&external, || {
+        let result = ScoreGateScoreContract::query_risk_gate_with_confidence(
+            &env,
+            wallet.clone(),
+            symbol_short!("XLM_USDC"),
+            75,
+            0,
+        );
+        assert!(result, "allowlisted external contract must pass strict gate checks");
+    });
+}
+
 // ── toggling: disable strict mode restores advisory behaviour ─────────────────
 
 #[test]

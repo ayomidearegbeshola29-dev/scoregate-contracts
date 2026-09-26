@@ -228,6 +228,23 @@ fn test_veto_before_half_timelock_succeeds() {
 }
 
 #[test]
+fn test_veto_parameter_change_legacy_service_mode_accepts_empty_signer_vector() {
+    let (env, client, admin, _service) = setup();
+    let value = encode_u64(&env, MIN_COOLDOWN_SECS);
+
+    let proposal_id = client.propose_parameter_change(
+        &admin_signers(&env, &admin),
+        &param_key_cooldown(),
+        &value,
+    );
+
+    client.veto_parameter_change(&Vec::new(&env), &proposal_id);
+
+    let record = client.get_parameter_proposal(&proposal_id);
+    assert_eq!(record.status, ParameterProposalStatus::Vetoed);
+}
+
+#[test]
 fn test_executed_proposal_removed_from_pending_index() {
     let (env, client, admin, _service) = setup();
     let value = encode_u64(&env, MIN_COOLDOWN_SECS);
