@@ -144,4 +144,9 @@ impl Error {
     /// `Policy::DataDeletion`, which is configured via
     /// `set_deletion_approval_policy` instead.
     pub const InvalidPolicy: Error = Error::InvalidThreshold;
+
+    // ── Contagion propagation bounds (Issue #55) ────────────────────────────
+    /// Returned by `propagate_contagion` when `boost` exceeds
+    /// `constants::MAX_CONTAGION_BOOST`.
+    pub const InvalidBoost: Error = Error::InvalidScore;
 }

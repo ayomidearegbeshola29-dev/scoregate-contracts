@@ -1062,6 +1062,10 @@ impl ScoreGateScoreContract {
     ) -> Result<(), Error> {
         Self::ensure_active(&env)?;
         Self::authorize_submission(&env, &signers)?;
+        // Epoch sealing: reject submissions when no epoch is open (#301, #53).
+        if !storage::is_epoch_open(&env) {
+            return Err(Error::EpochClosed);
+        }
 
         if submissions.is_empty() {
             return Err(Error::ConsensusInputEmpty);
@@ -1212,6 +1216,10 @@ impl ScoreGateScoreContract {
     ) -> Result<(), Error> {
         Self::ensure_active(&env)?;
         Self::authorize_submission(&env, &signers)?;
+        // Epoch sealing: reject submissions when no epoch is open (#301, #53).
+        if !storage::is_epoch_open(&env) {
+            return Err(Error::EpochClosed);
+        }
         if submissions.is_empty() {
             return Err(Error::ConsensusInputEmpty);
         }
@@ -12898,12 +12906,21 @@ impl ScoreGateScoreContract {
     /// # Errors
     /// - [`Error::CounterpartyLinkFull`] if either wallet's link set is already
     ///   full or if trying to self-link.
+    /// Requires authorization from *both* linked wallets (Issue #54): a
+    /// contagion-graph edge changes how each wallet's score can be affected
+    /// by the other, so unilateral consent from just one side isn't
+    /// sufficient — that would let one party link an unwilling counterparty
+    /// into its graph without their agreement. Self-referential edges and
+    /// the per-wallet link cap are already rejected inside
+    /// `storage::add_counterparty_link`.
     pub fn add_counterparty_link(
         env: Env,
         wallet_a: Address,
         wallet_b: Address,
         asset_pair: Symbol,
     ) -> Result<(), Error> {
+        wallet_a.require_auth();
+        wallet_b.require_auth();
         storage::add_counterparty_link(&env, &wallet_a, &wallet_b, &asset_pair)?;
         events::counterparty_link_added(&env, &wallet_a, &wallet_b, &asset_pair);
         Ok(())
@@ -12911,6 +12928,11 @@ impl ScoreGateScoreContract {
 
     /// Remove a bidirectional counterparty link between `wallet_a` and
     /// `wallet_b` for `asset_pair`.
+    ///
+    /// Requires authorization from *both* linked wallets (Issue #54), for
+    /// the same reason as `add_counterparty_link`: neither party should be
+    /// able to unilaterally sever (or, symmetrically, force) a relationship
+    /// the other party didn't agree to change.
     ///
     /// # Errors
     /// - [`Error::CounterpartyLinkFull`] if no link existed between the wallets.
@@ -12920,6 +12942,8 @@ impl ScoreGateScoreContract {
         wallet_b: Address,
         asset_pair: Symbol,
     ) -> Result<(), Error> {
+        wallet_a.require_auth();
+        wallet_b.require_auth();
         storage::remove_counterparty_link(&env, &wallet_a, &wallet_b, &asset_pair)?;
         events::counterparty_link_removed(&env, &wallet_a, &wallet_b, &asset_pair);
         Ok(())
@@ -12971,7 +12995,31 @@ impl ScoreGateScoreContract {
     /// Propagate an additive score boost of `boost` points to every
     /// counterparty of `anchor` for `asset_pair`.  Affected scores are
     /// capped at 100.  Returns the number of wallets that were boosted.
-    pub fn propagate_contagion(env: Env, anchor: Address, asset_pair: Symbol, boost: u32) -> u32 {
+    ///
+    /// Issue #55: this mutates *other* wallets' scores, so — unlike
+    /// `add_counterparty_link`'s mutual-consent model — the anchor wallet's
+    /// own authorization wouldn't protect anyone (the anchor consenting to
+    /// affect its own counterparties doesn't mean those counterparties
+    /// agreed to it). This requires admin multisig authorization instead,
+    /// plus a bounded `boost` and the contract's normal paused/frozen gates.
+    pub fn propagate_contagion(
+        env: Env,
+        admin_signers: Vec<Address>,
+        anchor: Address,
+        asset_pair: Symbol,
+        boost: u32,
+    ) -> Result<u32, Error> {
+        Self::require_admin_auth(&env, &admin_signers)?;
+        if storage::is_frozen(&env) {
+            return Err(Error::ContractPaused);
+        }
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+        if boost > constants::MAX_CONTAGION_BOOST {
+            return Err(Error::InvalidBoost);
+        }
+
         let counterparties = storage::get_counterparties(&env, &anchor, &asset_pair);
         let mut affected = 0u32;
         for i in 0..counterparties.len() {
@@ -12996,7 +13044,7 @@ impl ScoreGateScoreContract {
                 affected += 1;
             }
         }
-        affected
+        Ok(affected)
     }
 
     /// Walk a Merkle inclusion proof and verify that `leaf` is included in

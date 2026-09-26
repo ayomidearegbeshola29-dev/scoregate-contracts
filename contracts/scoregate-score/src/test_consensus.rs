@@ -667,3 +667,46 @@ fn test_set_reveal_window_insufficient_signers_after_multisig_configured() {
     // call must not have taken effect.
     assert_eq!(client.get_reveal_window(), 3_600u64);
 }
+
+// ── Epoch sealing on consensus paths (Issue #53) ───────────────────────────────
+//
+// `submit_score` has rejected submissions while no epoch is open since #301.
+// `submit_scores_batch` and `submit_scores_batch_attested` already carry the
+// same check (verified by reading the current code — issue #53 reported them
+// as missing it too, but they are not). `reveal_consensus` and
+// `submit_consensus_score` genuinely omitted it, letting scores settle
+// through the consensus paths after an epoch was sealed. Both now check
+// `is_epoch_open` immediately after auth, before any input validation, so an
+// empty/placeholder submissions vec is enough to prove the rejection.
+
+#[test]
+fn test_reveal_consensus_rejected_when_epoch_closed() {
+    let (env, client) = setup();
+    let wallet = Address::generate(&env);
+    let pair = symbol_short!("XLM_USDC");
+
+    client.close_epoch(&Vec::new(&env));
+
+    let result = client.try_reveal_consensus(
+        &Vec::new(&env),
+        &wallet,
+        &pair,
+        &Vec::new(&env),
+        &Vec::new(&env),
+        &1,
+    );
+    assert_eq!(result, Err(Ok(Error::EpochClosed)));
+}
+
+#[test]
+fn test_submit_consensus_score_rejected_when_epoch_closed() {
+    let (env, client) = setup();
+    let wallet = Address::generate(&env);
+    let pair = symbol_short!("XLM_USDC");
+
+    client.close_epoch(&Vec::new(&env));
+
+    let result =
+        client.try_submit_consensus_score(&Vec::new(&env), &wallet, &pair, &Vec::new(&env), &1);
+    assert_eq!(result, Err(Ok(Error::EpochClosed)));
+}

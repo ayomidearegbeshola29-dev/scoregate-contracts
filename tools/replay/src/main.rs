@@ -251,7 +251,16 @@ fn process_snapshot(
         let result = client.submit_scores_batch(&Vec::new(&env), &batch);
         let tx_sequence = count as u64 + 1;
         let accepted = result.accepted_count > 0;
-        let rejection_code = if accepted { None } else { Some(result.rejected_count) };
+        // `rejected_count` is a tally of how many batch entries were
+        // rejected, not an error discriminant — it happens to look like one
+        // here only because this batch always has exactly one entry. The
+        // actual per-entry rejection code lives in `results[i].rejection_code`
+        // (Issue #121).
+        let rejection_code = if accepted {
+            None
+        } else {
+            result.results.get(0).map(|entry_result| entry_result.rejection_code)
+        };
 
         transactions.push(TransactionEvidence {
             sequence: tx_sequence,
@@ -514,5 +523,45 @@ mod tests {
 
         assert_eq!(bundle.issue_references, vec!["ISSUE-1", "ISSUE-2"]);
         assert_eq!(bundle.hashes.issue_refs_hash, hash_json(&vec!["ISSUE-1", "ISSUE-2"]));
+    }
+
+    // Issue #121: `process_snapshot` used to report `result.rejected_count`
+    // (a tally of how many batch entries were rejected) as if it were the
+    // contract's error discriminant. Since each snapshot line submits a
+    // batch of exactly one entry, `rejected_count` is always 0 or 1 and
+    // happened to *look* like a plausible code, masking the bug. The real
+    // per-entry code lives in `results[i].rejection_code` (the struct field
+    // is named `results`, not `entry_results` as the issue described).
+    // Pausing the asset pair forces a genuine, known per-entry rejection
+    // code (`Error::ContractPaused`) so the fix can be verified precisely.
+    #[test]
+    fn process_snapshot_reports_the_real_per_entry_rejection_code() {
+        use scoregate_score::Error;
+        use soroban_sdk::testutils::Address as _;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ScoreGateScoreContract);
+        let client = ScoreGateScoreContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let service = Address::generate(&env);
+        client.initialize(&admin, &service);
+
+        let pair = Symbol::new(&env, "XLM_USDC");
+        client.set_pair_paused(&pair, &true);
+
+        let path =
+            std::env::temp_dir().join(format!("replay_snapshot_test_{}.ndjson", std::process::id()));
+        std::fs::write(&path, "{\"wallet\":\"wallet-x\",\"asset_pair\":\"XLM_USDC\",\"trades\":null}\n")
+            .expect("writing test snapshot file");
+
+        let result = process_snapshot(path.to_str().unwrap(), &env, &client, &sample_config(), &[]);
+        std::fs::remove_file(&path).ok();
+        let (count, bundle) = result.expect("process_snapshot should not error");
+
+        assert_eq!(count, 1);
+        let tx = &bundle.transactions[0];
+        assert!(!tx.accepted);
+        assert_eq!(tx.rejection_code, Some(Error::ContractPaused as u32));
     }
 }
