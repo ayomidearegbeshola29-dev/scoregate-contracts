@@ -14,6 +14,8 @@
 //! the score is stale, the oracle is silent, or the protocol's own pause state
 //! is active.
 
+mod events;
+
 use scoregate_score::ScoreGateScoreContractClient;
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
 
@@ -39,6 +41,8 @@ pub enum MockLendingError {
     StaleScore = 5,
     UnsupportedVersion = 6,
     Unauthorized = 7,
+    /// A gate threshold or confidence floor exceeds the valid 0-100 scale.
+    InvalidThreshold = 8,
 }
 
 #[contracttype]
@@ -70,8 +74,11 @@ impl MockLending {
         scoregate: Address,
         gate_threshold: u32,
         min_confidence: u32,
-    ) {
+    ) -> Result<(), MockLendingError> {
         admin.require_auth();
+        if gate_threshold > 100 || min_confidence > 100 {
+            return Err(MockLendingError::InvalidThreshold);
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::ScoreGate, &scoregate);
         env.storage().instance().set(&DataKey::GateThreshold, &gate_threshold);
@@ -82,6 +89,42 @@ impl MockLending {
         let client = ScoreGateScoreContractClient::new(&env, &scoregate);
         let expanded_score = matches!(client.try_get_version(), Ok(Ok(version)) if version >= 5);
         env.storage().instance().set(&DataKey::ExpandedRiskScore, &expanded_score);
+        Ok(())
+    }
+
+    /// Register or rotate the ScoreGate oracle this market consults for gate
+    /// checks. Mirrors `MockAmm::set_risk_oracle`. (Issue #117)
+    pub fn set_risk_oracle(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+    ) -> Result<(), MockLendingError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::ScoreGate, &oracle);
+        let client = ScoreGateScoreContractClient::new(&env, &oracle);
+        let expanded_score = matches!(client.try_get_version(), Ok(Ok(version)) if version >= 5);
+        env.storage().instance().set(&DataKey::ExpandedRiskScore, &expanded_score);
+        events::oracle_updated(&env, &oracle);
+        Ok(())
+    }
+
+    /// Re-probe the *currently configured* oracle's capabilities without
+    /// changing its address. Needed when the oracle contract is upgraded in
+    /// place (redeployed at the same address) — `set_risk_oracle` re-probes
+    /// on an address change, but nothing previously re-probed a same-address
+    /// upgrade. (Issue #120)
+    pub fn refresh_oracle_capabilities(env: Env, admin: Address) -> Result<bool, MockLendingError> {
+        Self::require_admin(&env, &admin)?;
+        let scoregate: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ScoreGate)
+            .ok_or(MockLendingError::NotConfigured)?;
+        let client = ScoreGateScoreContractClient::new(&env, &scoregate);
+        let expanded_score = matches!(client.try_get_version(), Ok(Ok(version)) if version >= 5);
+        env.storage().instance().set(&DataKey::ExpandedRiskScore, &expanded_score);
+        events::capabilities_refreshed(&env, expanded_score);
+        Ok(expanded_score)
     }
 
     pub fn set_borrow_gate_config(
@@ -94,11 +137,15 @@ impl MockLending {
         required_oracle_version: u32,
     ) -> Result<(), MockLendingError> {
         Self::require_admin(&env, &admin)?;
+        if gate_threshold > 100 || min_confidence > 100 {
+            return Err(MockLendingError::InvalidThreshold);
+        }
         env.storage().instance().set(&DataKey::GateThreshold, &gate_threshold);
         env.storage().instance().set(&DataKey::MinConfidence, &min_confidence);
         env.storage().instance().set(&DataKey::FailPolicy, &fail_policy);
         env.storage().instance().set(&DataKey::MaxStalenessSecs, &max_staleness_secs);
         env.storage().instance().set(&DataKey::RequiredOracleVersion, &required_oracle_version);
+        events::gate_config_updated(&env, gate_threshold, min_confidence);
         Ok(())
     }
 
@@ -190,6 +237,7 @@ impl MockLending {
             }
         }
 
+        events::borrow_executed(&env, &user, &asset_pair, amount);
         Ok(())
     }
 }
