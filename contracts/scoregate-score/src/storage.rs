@@ -18,7 +18,7 @@ use crate::types::{
     SignerAccuracyRecord, SignerStateRecord, SubscorePayload, TokenBucket, UpgradeProposal,
     WelfordCorrState,
 };
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, SymbolStr, TryFromVal, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, TryFromVal, Vec};
 
 pub const MAX_MANDATORY_REVIEWERS: u32 = 10;
 
@@ -248,7 +248,8 @@ fn score_entry_index_bucket(env: &Env, wallet: &Address, asset_pair: &Symbol) ->
         hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
     }
     if let Ok(pair) = soroban_sdk::SymbolStr::try_from_val(env, &asset_pair.to_symbol_val()) {
-        for byte in pair.as_ref() {
+        let pair_bytes: &[u8] = pair.as_ref();
+        for byte in pair_bytes {
             hash = hash.wrapping_mul(31).wrapping_add(*byte as u32);
         }
     }
@@ -2385,6 +2386,22 @@ pub fn get_signer_grace_period(env: &Env) -> u64 {
 
 pub fn set_signer_grace_period(env: &Env, grace_secs: u64) {
     env.storage().instance().set(&DataKeyB::SignerGracePeriod, &grace_secs);
+}
+
+/// Alias used by governance_helpers — delegates to `get_signer_grace_period`.
+pub fn get_signer_grace_period_secs(env: &Env) -> u64 {
+    get_signer_grace_period(env)
+}
+
+pub fn get_active_signer_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKeyD::ActiveSignerIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_active_signer_index(env: &Env, index: &Vec<Address>) {
+    env.storage().instance().set(&DataKeyD::ActiveSignerIndex, index);
 }
 
 // ── Model version registry ────────────────────────────────────────────────────

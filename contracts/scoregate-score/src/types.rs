@@ -1002,6 +1002,8 @@ pub enum DataKeyD {
     PendingPolicyBundle,
     RequireDestructiveMultisig,
     SignerState(Address),
+    /// Index of currently active signers for efficient iteration.
+    ActiveSignerIndex,
 }
 
 #[contracttype]

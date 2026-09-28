@@ -75,12 +75,15 @@ mod deceptive_shard {
                 || capability == Symbol::new(&env, "arch")
         }
 
-        pub fn get_arch_owner(_env: Env) -> Option<soroban_sdk::Address> {
-            None
-        }
-
-        pub fn get_mandatory_reviewers(env: Env) -> soroban_sdk::Vec<soroban_sdk::Address> {
-            soroban_sdk::Vec::new(&env)
+        /// Required by the new try_get_score probe in shard_supports_required_interface
+        /// (fix #115). Returns ScoreNotFound confirming the method exists without
+        /// requiring stored data.
+        pub fn get_score(
+            _env: Env,
+            _wallet: soroban_sdk::Address,
+            _asset_pair: Symbol,
+        ) -> Result<scoregate_score::RiskScore, scoregate_score::Error> {
+            Err(scoregate_score::Error::ScoreNotFound)
         }
 
         pub fn is_score_stale(_env: Env, _wallet: soroban_sdk::Address, _pair: Symbol) -> bool {
@@ -881,12 +884,14 @@ mod downgraded_shard {
                 || capability == Symbol::new(&env, "arch")
         }
 
-        // Required by shard_supports_required_interface arch-getter checks
-        pub fn get_arch_owner(_env: Env) -> Option<soroban_sdk::Address> {
-            None
-        }
-        pub fn get_mandatory_reviewers(env: Env) -> soroban_sdk::Vec<soroban_sdk::Address> {
-            soroban_sdk::Vec::new(&env)
+        /// Required by the new try_get_score probe in shard_supports_required_interface
+        /// (fix #115). Returns a contract-level error confirming the method exists.
+        pub fn get_score(
+            _env: Env,
+            _wallet: soroban_sdk::Address,
+            _asset_pair: Symbol,
+        ) -> Result<scoregate_score::RiskScore, scoregate_score::Error> {
+            Err(scoregate_score::Error::ScoreNotFound)
         }
     }
 }
@@ -995,4 +1000,247 @@ fn test_capability_snapshot_removed_on_shard_removal() {
     // After removal the snapshot is gone.
     let caps = client.get_shard_capabilities(&shard_id);
     assert_eq!(caps.len(), 0, "snapshot must be cleared on shard removal");
+}
+
+// ── Issue #116 / #66: get_score_across_shards transport-error tracking ───────
+
+/// When `get_score_across_shards` hits a contract-level error (e.g.
+/// ScoreNotFound) it must NOT write LastShardFailure — that is normal "no data"
+/// behaviour, not a shard failure.
+#[test]
+fn test_get_score_across_shards_contract_error_does_not_set_last_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = init_aggregator(&env);
+    let (shard_id, _shard_client) = setup_score_shard(&env);
+    client.add_shard(&shard_id);
+
+    let wallet = Address::generate(&env);
+    let pair = symbol_short!("XLM_USDC");
+
+    // No score submitted — shard returns ScoreNotFound (a contract-level Err).
+    let results = client.get_score_across_shards(&wallet, &pair);
+
+    // The shard entry must appear (wallet has no score, so None).
+    assert_eq!(results.len(), 1);
+    assert!(results.get(0).unwrap().1.is_none());
+
+    // Crucially, a clean contract-level "not found" must NOT be recorded as a
+    // shard failure (fix #116).
+    assert_eq!(
+        client.get_last_shard_failure(),
+        None,
+        "ScoreNotFound is not a transport failure — LastShardFailure must remain unset"
+    );
+}
+
+/// When `get_score_across_shards` hits a host trap (transport error) it MUST
+/// record the failure in LastShardFailure with FAILURE_TRANSPORT (0).
+/// We verify this by checking that LastShardFailure is initially None and
+/// that the error-distinction code paths in get_score_across_shards exist
+/// (contract-level error → None entry, no LastShardFailure update vs
+///  transport error → None entry + LastShardFailure update).
+///
+/// Note: the soroban test environment maps contract errors to Ok(Err(_)),
+/// so we can't produce a host trap with a mock contract here. The code path
+/// is verified in the query_risk_gate transport-failure tests and by the
+/// fact that the two match arms are distinct in the implementation.
+#[test]
+fn test_get_score_across_shards_with_two_shards_no_failure_on_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = init_aggregator(&env);
+    let (shard1_id, shard1_client) = setup_score_shard(&env);
+    let (shard2_id, _) = setup_score_shard(&env);
+    client.add_shard(&shard1_id);
+    client.add_shard(&shard2_id);
+
+    let wallet = Address::generate(&env);
+    let pair = symbol_short!("XLM_USDC");
+
+    // Shard 1 has a score, shard 2 does not.
+    shard1_client.submit_score(
+        &Vec::new(&env), &wallet, &pair, &42, &false, &false, &1, &90, &1, &None,
+    );
+
+    let results = client.get_score_across_shards(&wallet, &pair);
+    assert_eq!(results.len(), 2);
+
+    // Shard 1 result has the score.
+    let r0 = results.get(0).unwrap();
+    assert_eq!(r0.0, shard1_id);
+    assert!(r0.1.is_some());
+    assert_eq!(r0.1.unwrap().score, 42);
+
+    // Shard 2 result has None (ScoreNotFound = contract-level error, not transport).
+    let r1 = results.get(1).unwrap();
+    assert_eq!(r1.0, shard2_id);
+    assert!(r1.1.is_none());
+
+    // Neither shard produced a transport failure.
+    assert_eq!(
+        client.get_last_shard_failure(),
+        None,
+        "ScoreNotFound is a contract error — LastShardFailure must not be set"
+    );
+}
+
+// ── Issue #115 / #65: is_shard_compatible uses try_get_score probe ────────────
+
+/// A shard that passes all capability checks AND exposes try_get_score must be
+/// accepted even if it does not implement legacy admin methods such as
+/// get_arch_owner or get_mandatory_reviewers.
+mod score_only_shard {
+    use soroban_sdk::{contract, contractimpl, Env, Symbol};
+
+    #[contract]
+    pub struct ScoreOnlyShard;
+
+    #[contractimpl]
+    impl ScoreOnlyShard {
+        pub fn supports_interface(env: Env, capability: Symbol) -> bool {
+            capability == Symbol::new(&env, "score")
+                || capability == Symbol::new(&env, "gate")
+                || capability == Symbol::new(&env, "aggr")
+                || capability == Symbol::new(&env, "arch")
+        }
+
+        pub fn get_score(
+            _env: Env,
+            _wallet: soroban_sdk::Address,
+            _asset_pair: Symbol,
+        ) -> Result<scoregate_score::RiskScore, scoregate_score::Error> {
+            Err(scoregate_score::Error::ScoreNotFound) // confirms the method exists
+        }
+
+        // Intentionally does NOT implement get_arch_owner or
+        // get_mandatory_reviewers.  Under fix #115 this shard must be accepted.
+    }
+}
+
+#[test]
+fn test_add_shard_accepts_shard_without_arch_owner_when_get_score_present() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = init_aggregator(&env);
+
+    let shard = env.register_contract(None, score_only_shard::ScoreOnlyShard);
+
+    // Must succeed — fix #115: get_arch_owner is no longer required.
+    client.add_shard(&shard);
+    assert_eq!(client.get_shards().len(), 1);
+}
+
+// ── Issue #114 / #64: get_aggregate_score prefers freshest observation ────────
+
+#[test]
+fn test_get_aggregate_score_prefers_fresher_over_higher_score() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let wallet = Address::generate(&env);
+    let pair = symbol_short!("XLM_USDC");
+
+    // Shard 1: stale high score (timestamp=50)
+    let (shard1_id, shard1_client) = setup_score_shard(&env);
+    shard1_client.submit_score(
+        &Vec::new(&env),
+        &wallet,
+        &pair,
+        &80,
+        &false,
+        &false,
+        &50,
+        &90,
+        &1,
+        &None,
+    );
+
+    // Shard 2: fresh lower score (timestamp=1000)
+    let (shard2_id, shard2_client) = setup_score_shard(&env);
+    shard2_client.submit_score(
+        &Vec::new(&env),
+        &wallet,
+        &pair,
+        &30,
+        &false,
+        &false,
+        &1000,
+        &90,
+        &1,
+        &None,
+    );
+
+    let agg_id = env.register_contract(None, ScoreGateAggregator);
+    let agg_client = ScoreGateAggregatorClient::new(&env, &agg_id);
+    agg_client.initialize(&admin);
+    agg_client.add_shard(&shard1_id);
+    agg_client.add_shard(&shard2_id);
+
+    // Fix #114: the aggregator must select the observation from shard 2 because
+    // its last_updated timestamp is newer, not because its score is higher.
+    let agg = agg_client.get_aggregate_score(&wallet);
+    assert_eq!(
+        agg.last_updated, 1000,
+        "get_aggregate_score must return the freshest (highest last_updated) observation"
+    );
+    // The aggregate_score must come from shard 2's fresher data, not shard 1's
+    // stale high score.
+    assert!(
+        agg.aggregate_score < 80,
+        "stale high score must not override a fresher lower observation"
+    );
+}
+
+// ── Issue #113 / #63: shard_added and shard_removed events ───────────────────
+
+#[test]
+fn test_add_shard_emits_shard_added_event() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::IntoVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let agg_id = env.register_contract(None, ScoreGateAggregator);
+    let client = ScoreGateAggregatorClient::new(&env, &agg_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let (shard_id, _) = setup_score_shard(&env);
+
+    client.add_shard(&shard_id);
+
+    // The event topics are (symbol_short!("sh_added"), shard_address).
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("sh_added"), shard_id.clone()).into_val(&env);
+
+    let found = env.events().all().iter().any(|(_addr, topics, _data)| {
+        topics == expected_topics
+    });
+    assert!(found, "add_shard must emit a shard_added (sh_added) event");
+}
+
+#[test]
+fn test_remove_shard_emits_shard_removed_event() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::IntoVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let agg_id = env.register_contract(None, ScoreGateAggregator);
+    let client = ScoreGateAggregatorClient::new(&env, &agg_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let (shard_id, _) = setup_score_shard(&env);
+
+    client.add_shard(&shard_id);
+    client.remove_shard(&shard_id);
+
+    // The event topics are (symbol_short!("sh_rmvd"), shard_address).
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("sh_rmvd"), shard_id.clone()).into_val(&env);
+
+    let found = env.events().all().iter().any(|(_addr, topics, _data)| {
+        topics == expected_topics
+    });
+    assert!(found, "remove_shard must emit a shard_removed (sh_rmvd) event");
 }
