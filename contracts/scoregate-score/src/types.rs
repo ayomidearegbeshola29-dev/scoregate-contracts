@@ -1002,6 +1002,10 @@ pub enum DataKeyD {
     PendingPolicyBundle,
     RequireDestructiveMultisig,
     SignerState(Address),
+    /// Grace period applied to signer state changes, in seconds.
+    SignerGracePeriodSecs,
+    /// Addresses currently eligible to sign, in priority order.
+    ActiveSignerIndex,
 }
 
 #[contracttype]

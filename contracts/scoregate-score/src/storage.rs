@@ -18,7 +18,7 @@ use crate::types::{
     SignerAccuracyRecord, SignerStateRecord, SubscorePayload, TokenBucket, UpgradeProposal,
     WelfordCorrState,
 };
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, SymbolStr, TryFromVal, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, TryFromVal, Vec};
 
 pub const MAX_MANDATORY_REVIEWERS: u32 = 10;
 
@@ -248,7 +248,7 @@ fn score_entry_index_bucket(env: &Env, wallet: &Address, asset_pair: &Symbol) ->
         hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
     }
     if let Ok(pair) = soroban_sdk::SymbolStr::try_from_val(env, &asset_pair.to_symbol_val()) {
-        for byte in pair.as_ref() {
+        for byte in pair.as_ref() as &[u8] {
             hash = hash.wrapping_mul(31).wrapping_add(*byte as u32);
         }
     }
@@ -3244,6 +3244,34 @@ pub fn set_signer_state_record(env: &Env, record: &SignerStateRecord) {
 
 pub fn get_signer_state_record(env: &Env, signer: &Address) -> Option<SignerStateRecord> {
     env.storage().persistent().get(&DataKeyD::SignerState(signer.clone()))
+}
+
+/// Grace period for signer state changes, defaulting to 1 hour.
+///
+/// Restored after the `ledgerlens-score` -> `scoregate-score` package rename
+/// dropped it, which left `governance_helpers.rs` calling a function that did not
+/// exist and broke the build.
+pub fn get_signer_grace_period_secs(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKeyD::SignerGracePeriodSecs)
+        .unwrap_or(crate::constants::DEFAULT_SIGNER_GRACE_PERIOD_SECS)
+}
+
+pub fn set_signer_grace_period_secs(env: &Env, secs: u64) {
+    env.storage().instance().set(&DataKeyD::SignerGracePeriodSecs, &secs);
+}
+
+/// Signer addresses eligible to sign, in priority order.
+pub fn get_active_signer_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKeyD::ActiveSignerIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_active_signer_index(env: &Env, signers: &Vec<Address>) {
+    env.storage().instance().set(&DataKeyD::ActiveSignerIndex, signers);
 }
 
 // ── #631: Emergency freeze / thaw ──────────────────────────────────────────

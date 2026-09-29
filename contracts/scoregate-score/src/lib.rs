@@ -5158,7 +5158,9 @@ impl ScoreGateScoreContract {
         Self::check_service_silence(&env);
         // #302: strict gate enforcement — reject callers not in the allowlist.
         if storage::get_gate_enforcement_mode(&env) {
-            let caller = env.invoker();
+            // `env.invoker()` is not a Soroban API. This reads the contract's
+            // own address, matching the rest of the gate-enforcement code.
+            let caller = env.current_contract_address();
             let callers = storage::get_gate_callers(&env);
             if !callers.contains(&caller) {
                 return false; // CallerNotAuthorized: infallible, so return false
@@ -11534,6 +11536,81 @@ impl ScoreGateScoreContract {
         }
 
         storage::set_last_submit_time(env, wallet, asset_pair, now);
+        Ok(())
+    }
+
+    fn finalize_score_state(
+        env: &Env,
+        wallet: &Address,
+        asset_pair: &Symbol,
+        risk_score: &RiskScore,
+    ) -> Result<(), Error> {
+        let previous_score = storage::peek_score(env, wallet, asset_pair).map(|s| s.score);
+        let is_new_wallet_pair = previous_score.is_none();
+        let now = env.ledger().timestamp();
+
+        storage::set_score(env, wallet, asset_pair, risk_score);
+        storage::set_score_submission_ledger(env, wallet, asset_pair, env.ledger().sequence());
+        let floor_policy = storage::get_score_floor_policy(env);
+        let service_set = storage::get_service_set(env);
+        let provenance = SubmissionProvenance {
+            model_version: risk_score.model_version,
+            service_threshold: storage::get_service_threshold(env),
+            signers_count: service_set.len(),
+            score_floor_enabled: floor_policy.enabled,
+            score_floor_high_water_mark: floor_policy.high_water_mark,
+            score_floor_value: floor_policy.floor_value,
+            cooldown_secs: storage::get_pair_cooldown_secs(env, asset_pair),
+            epoch_id: storage::get_current_epoch(env),
+            ledger_sequence: env.ledger().sequence(),
+            submitted_at: now,
+            validation_branch: if !service_set.is_empty()
+                && storage::get_service_threshold(env) > 0
+            {
+                symbol_short!("multisig")
+            } else {
+                symbol_short!("single")
+            },
+        };
+        storage::set_submission_provenance(env, wallet, asset_pair, &provenance);
+        storage::set_last_global_submission_time(env, now);
+        storage::push_score_history(env, wallet, asset_pair, risk_score);
+        storage::register_pair_for_wallet(env, wallet, asset_pair);
+        storage::increment_score_count(env, wallet, asset_pair);
+        storage::increment_pair_score_count(env, asset_pair);
+        if is_new_wallet_pair {
+            storage::increment_total_wallets_scored(env);
+        }
+        storage::update_model_stats(env, risk_score.model_version, risk_score.score);
+        storage::update_historical_max_score(env, wallet, asset_pair, risk_score.score);
+        storage::update_histogram_on_write(env, previous_score, risk_score.score);
+        Self::update_welford_correlation(env, wallet, asset_pair, risk_score.score);
+        Self::refresh_aggregate_cache(env, wallet);
+        Self::assign_wallet_cluster(env, wallet);
+        Self::update_verkle_commitment(env, wallet, asset_pair, risk_score);
+
+        let score_threshold = storage::get_risk_threshold(env);
+        if risk_score.score >= score_threshold {
+            events::threshold_breached(
+                env,
+                wallet,
+                asset_pair,
+                risk_score.score,
+                score_threshold,
+            );
+        }
+        Self::update_breach_counter(env, wallet, asset_pair, risk_score.score, score_threshold);
+        Self::evaluate_risk_band(env, wallet, asset_pair, risk_score.score, score_threshold);
+        Self::emit_score_delta(env, wallet, asset_pair, previous_score, risk_score.score);
+        Self::emit_score_jump_anomaly(
+            env,
+            wallet,
+            asset_pair,
+            previous_score,
+            risk_score.score,
+            risk_score.model_version,
+        );
+        events::score_submitted(env, wallet, asset_pair, risk_score);
         Ok(())
     }
 
