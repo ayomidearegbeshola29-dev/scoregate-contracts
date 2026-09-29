@@ -3393,6 +3393,10 @@ pub fn export_entries_page(
 ) -> soroban_sdk::Vec<crate::types::ExportableScoreEntry> {
     let index: soroban_sdk::Vec<(Address, Symbol)> = get_score_entry_index(env);
     let mut out: soroban_sdk::Vec<crate::types::ExportableScoreEntry> = soroban_sdk::Vec::new(env);
+    // Clamp rather than revert (#18): an oversized page is a caller mistake, and
+    // returning a full page is more useful than failing the whole export. Callers
+    // paginating until they see a short page still terminate.
+    let page_size = core::cmp::min(page_size, crate::constants::MAX_EXPORT_PAGE_SIZE);
     let end = core::cmp::min(offset.saturating_add(page_size), index.len());
     let start = core::cmp::min(offset, end);
     for i in start..end {

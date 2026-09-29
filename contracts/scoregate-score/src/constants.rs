@@ -18,6 +18,13 @@ pub const MAX_SCORE: u32 = 100;
 pub const MAX_HISTORY_DEPTH: u32 = 50;
 pub const DEFAULT_HISTORY_MAX_DEPTH: u32 = 10;
 pub const MAX_BATCH_SIZE: u32 = 20;
+
+/// Upper bound on `page_size` for paginated exports (#18).
+///
+/// Without a cap, `page_size: u32::MAX` makes the export loop walk the entire
+/// entry index in a single call, exhausting the VM CPU/memory budget and
+/// turning a read endpoint into a way to make the contract run out of gas.
+pub const MAX_EXPORT_PAGE_SIZE: u32 = 200;
 pub const MAX_ASSET_PAIR_BYTES: u32 = 9;
 pub const MAX_SCORE_COMMITMENT_BYTES: u32 = 32;
 pub const MAX_DISPUTE_BOND_PREIMAGE_BYTES: u32 = 80;

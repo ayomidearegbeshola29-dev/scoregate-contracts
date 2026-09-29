@@ -231,6 +231,61 @@ fn test_export_all_scores_paginated() {
     assert_eq!(page2.len(), 1);
 }
 
+/// #18: an unbounded `page_size` walked the whole index in one call and
+/// exhausted the VM budget. It is now clamped to `MAX_EXPORT_PAGE_SIZE`.
+#[test]
+fn test_export_all_scores_paginated_clamps_oversized_page_size() {
+    use crate::constants::MAX_EXPORT_PAGE_SIZE;
+
+    let (env, client, _admin, _service) = initialized();
+
+    for _ in 0..3 {
+        let wallet = Address::generate(&env);
+        let pair = symbol_short!("XLM_USDC");
+        submit_dummy_score(&env, &client, &wallet, &pair);
+    }
+
+    // u32::MAX previously tried to iterate every entry; now it returns one
+    // capped page instead.
+    let page = client.export_all_scores_paginated(&0, &u32::MAX);
+    assert_eq!(page.len(), 3.min(MAX_EXPORT_PAGE_SIZE as u32));
+
+    // A page size just over the cap is clamped too.
+    let over = client.export_all_scores_paginated(&0, &(MAX_EXPORT_PAGE_SIZE + 1));
+    assert_eq!(over.len(), page.len());
+
+    // A normal page size is unaffected.
+    let normal = client.export_all_scores_paginated(&0, &2);
+    assert_eq!(normal.len(), 2);
+}
+
+/// #18: a clamped page must still let a paginating caller make progress, or
+/// `offset` could never advance past the cap.
+#[test]
+fn test_export_all_scores_paginated_terminates_when_paginating() {
+    let (env, client, _admin, _service) = initialized();
+
+    for _ in 0..5 {
+        let wallet = Address::generate(&env);
+        let pair = symbol_short!("XLM_USDC");
+        submit_dummy_score(&env, &client, &wallet, &pair);
+    }
+
+    let mut offset = 0u32;
+    let mut seen = 0u32;
+    loop {
+        let page = client.export_all_scores_paginated(&offset, &u32::MAX);
+        if page.is_empty() {
+            break;
+        }
+        seen += page.len();
+        offset += page.len();
+        assert!(offset <= 5, "pagination ran past the end of the index");
+    }
+
+    assert_eq!(seen, 5);
+}
+
 // ── State Checksum Verification ─────────────────────────────────────────────
 
 #[test]
