@@ -7,6 +7,8 @@ extern crate std;
 mod test;
 #[cfg(test)]
 mod test_conflict_arbitration;
+#[cfg(test)]
+mod test_fail_closed;
 const REQUIRED_SHARD_CAPABILITIES: [&str; 4] = ["score", "gate", "aggr", "arch"];
 use scoregate_score::{AggregateRiskScore, Error as ScoreError, RiskScore};
 use soroban_sdk::{
@@ -182,13 +184,19 @@ impl ScoreGateAggregator {
     pub fn get_decay_rate(env: Env) -> Result<(u64, u64), ScoreError> {
         let shards: Vec<Address> =
             env.storage().instance().get(&DataKey::Shards).unwrap_or_else(|| Vec::new(&env));
-        let primary = shards.get(0).ok_or(ScoreError::ScoreNotFound)?;
-        let client = scoregate_score::ScoreGateScoreContractClient::new(&env, &primary);
-
-        match client.try_get_decay_rate() {
-            Ok(Ok(rate)) => Ok(rate),
-            _ => Err(ScoreError::ScoreNotFound),
+        // #61: try each healthy shard in order rather than only index 0, so
+        // taking the primary offline does not break this getter.
+        for i in 0..shards.len() {
+            let shard = shards.get(i).ok_or(ScoreError::ScoreNotFound)?;
+            if !is_shard_healthy(&env, &shard) {
+                continue;
+            }
+            let client = scoregate_score::ScoreGateScoreContractClient::new(&env, &shard);
+            if let Ok(Ok(rate)) = client.try_get_decay_rate() {
+                return Ok(rate);
+            }
         }
+        Err(ScoreError::ScoreNotFound)
     }
 
     /// Returns the primary shard's minimum agreeing-model consensus threshold `k`.
@@ -201,13 +209,18 @@ impl ScoreGateAggregator {
     pub fn get_consensus_threshold_k(env: Env) -> Result<u32, ScoreError> {
         let shards: Vec<Address> =
             env.storage().instance().get(&DataKey::Shards).unwrap_or_else(|| Vec::new(&env));
-        let primary = shards.get(0).ok_or(ScoreError::ScoreNotFound)?;
-        let client = scoregate_score::ScoreGateScoreContractClient::new(&env, &primary);
-
-        match client.try_get_consensus_config() {
-            Ok(Ok(config)) => Ok(config.0),
-            _ => Err(ScoreError::ScoreNotFound),
+        // #61: same fallback as `get_decay_rate`.
+        for i in 0..shards.len() {
+            let shard = shards.get(i).ok_or(ScoreError::ScoreNotFound)?;
+            if !is_shard_healthy(&env, &shard) {
+                continue;
+            }
+            let client = scoregate_score::ScoreGateScoreContractClient::new(&env, &shard);
+            if let Ok(Ok(config)) = client.try_get_consensus_config() {
+                return Ok(config.0);
+            }
         }
+        Err(ScoreError::ScoreNotFound)
     }
 
     /// Returns whether the given wallet is currently on any shard's monitoring watchlist.
@@ -349,6 +362,10 @@ impl ScoreGateAggregator {
         if shards.is_empty() {
             return false;
         }
+        // #59: count the shards that actually answered. With every shard skipped
+        // as unhealthy the loop body never ran and the function fell out
+        // returning `true`, so a total shard outage opened the gate.
+        let mut consulted = 0u32;
         for i in 0..shards.len() {
             let shard = shards.get(i).unwrap();
             if !is_shard_healthy(&env, &shard) {
@@ -356,17 +373,18 @@ impl ScoreGateAggregator {
             }
             let client = scoregate_score::ScoreGateScoreContractClient::new(&env, &shard);
             match client.try_query_risk_gate(&wallet, &asset_pair, &gate_threshold) {
-                Ok(Ok(true)) => {}
+                Ok(Ok(true)) => consulted += 1,
                 Ok(Ok(false)) => return false,
                 _ => {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_TRANSPORT));
+                    // #60: a read query must not write storage.
+                    env.events()
+                        .publish((symbol_short!("sh_fail"), shard.clone()), FAILURE_TRANSPORT);
                     return false;
                 }
             }
         }
-        true
+        // Fail closed: no shard was able to vouch for this wallet.
+        consulted > 0
     }
 
     /// Infallible confidence-gated query across all registered healthy shards.
@@ -402,9 +420,11 @@ impl ScoreGateAggregator {
                 Ok(Ok(true)) => {}
                 Ok(Ok(false)) => return false,
                 _ => {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_TRANSPORT));
+                    // #60: a read query must not mutate storage, so the failure is
+                    // reported as a diagnostic event instead of a `LastShardFailure`
+                    // write. Health is set explicitly via `set_shard_health`.
+                    env.events()
+                        .publish((symbol_short!("sh_fail"), shard.clone()), FAILURE_TRANSPORT);
                     return false;
                 }
             }
@@ -443,14 +463,18 @@ impl ScoreGateAggregator {
                     }
                 },
                 Ok(Err(_conv_err)) => {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_CONTRACT_ERROR));
+                    // #60: a read query must not mutate storage, so the failure is
+                    // reported as a diagnostic event instead of a `LastShardFailure`
+                    // write. Health is set explicitly via `set_shard_health`.
+                    env.events()
+                        .publish((symbol_short!("sh_fail"), shard.clone()), FAILURE_CONTRACT_ERROR);
                 }
                 Err(_) => {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_TRANSPORT));
+                    // #60: a read query must not mutate storage, so the failure is
+                    // reported as a diagnostic event instead of a `LastShardFailure`
+                    // write. Health is set explicitly via `set_shard_health`.
+                    env.events()
+                        .publish((symbol_short!("sh_fail"), shard.clone()), FAILURE_TRANSPORT);
                 }
             }
         }
@@ -480,14 +504,18 @@ impl ScoreGateAggregator {
                     }
                 },
                 Ok(Err(_conv_err)) => {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_CONTRACT_ERROR));
+                    // #60: a read query must not mutate storage, so the failure is
+                    // reported as a diagnostic event instead of a `LastShardFailure`
+                    // write. Health is set explicitly via `set_shard_health`.
+                    env.events()
+                        .publish((symbol_short!("sh_fail"), shard.clone()), FAILURE_CONTRACT_ERROR);
                 }
                 Err(_) => {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_TRANSPORT));
+                    // #60: a read query must not mutate storage, so the failure is
+                    // reported as a diagnostic event instead of a `LastShardFailure`
+                    // write. Health is set explicitly via `set_shard_health`.
+                    env.events()
+                        .publish((symbol_short!("sh_fail"), shard.clone()), FAILURE_TRANSPORT);
                 }
             }
         }
@@ -560,9 +588,11 @@ impl ScoreGateAggregator {
                     }
                 }
                 _ => {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_TRANSPORT));
+                    // #60: a read query must not mutate storage, so the failure is
+                    // reported as a diagnostic event instead of a `LastShardFailure`
+                    // write. Health is set explicitly via `set_shard_health`.
+                    env.events()
+                        .publish((symbol_short!("sh_fail"), shard.clone()), FAILURE_TRANSPORT);
                 }
             }
         }
