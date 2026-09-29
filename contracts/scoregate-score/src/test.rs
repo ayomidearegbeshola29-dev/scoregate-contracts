@@ -3556,6 +3556,67 @@ fn test_remove_counterparty_link_requires_both_wallets_auth() {
         .remove_counterparty_link(&wallet_a, &wallet_b, &asset_pair);
 }
 
+// ── set_jump_threshold bounds (#56) ────────────────────────────────────────────
+
+/// #56: a threshold above 99 can never trigger, because a score delta is capped
+/// at 100, so jump anomaly detection would be silently disabled forever.
+#[test]
+fn test_set_jump_threshold_rejects_out_of_range() {
+    let (env, client, admin, _service) = initialized();
+    let signers = vec![&env, admin.clone()];
+
+    // Above the maximum.
+    assert!(client.try_set_jump_threshold(&signers, &100).is_err());
+    assert!(client.try_set_jump_threshold(&signers, &1_000).is_err());
+    assert!(client.try_set_jump_threshold(&signers, &u32::MAX).is_err());
+    // Zero is equally meaningless.
+    assert!(client.try_set_jump_threshold(&signers, &0).is_err());
+
+    // The boundary itself is still allowed.
+    assert!(client.try_set_jump_threshold(&signers, &99).is_ok());
+    assert!(client.try_set_jump_threshold(&signers, &1).is_ok());
+}
+
+// ── dormancy config (#55) ─────────────────────────────────────────────────────
+
+/// #55: the dormancy storage keys existed with no way to set them from the
+/// contract, so the feature was unreachable and the keys were dead weight in
+/// the config root.
+#[test]
+fn test_dormancy_config_defaults_to_disabled() {
+    let (_env, client, _admin, _service) = initialized();
+
+    let (inactivity, decay_bps) = client.get_dormancy_config();
+    assert_eq!(inactivity, 0);
+    assert_eq!(decay_bps, 0);
+}
+
+#[test]
+fn test_set_dormancy_config_round_trips() {
+    let (env, client, admin, _service) = initialized();
+    let signers = vec![&env, admin.clone()];
+
+    assert!(client.try_set_dormancy_inactivity_secs(&signers, &3_600).is_ok());
+    assert!(client.try_set_dormancy_decay_fraction_bps(&signers, &250).is_ok());
+
+    let (inactivity, decay_bps) = client.get_dormancy_config();
+    assert_eq!(inactivity, 3_600);
+    assert_eq!(decay_bps, 250);
+}
+
+#[test]
+fn test_set_dormancy_decay_fraction_rejects_over_100_percent() {
+    let (env, client, admin, _service) = initialized();
+    let signers = vec![&env, admin];
+
+    // Above 10_000 bps the decay would take a score below zero.
+    assert!(client.try_set_dormancy_decay_fraction_bps(&signers, &10_001).is_err());
+    assert!(client.try_set_dormancy_decay_fraction_bps(&signers, &u32::MAX).is_err());
+
+    // The boundary is allowed.
+    assert!(client.try_set_dormancy_decay_fraction_bps(&signers, &10_000).is_ok());
+}
+
 // ── get_score_variance tests ──────────────────────────────────────────────────
 
 #[test]
@@ -3563,11 +3624,12 @@ fn test_get_score_variance_empty() {
     let (env, client, _admin, _service) = initialized();
     let wallet = Address::generate(&env);
     let asset_pair = symbol_short!("XLM_USDC");
-    assert_eq!(client.get_score_variance(&wallet, &asset_pair), 0);
+    // #58: no history is `None`, not a zero variance.
+    assert_eq!(client.get_score_variance(&wallet, &asset_pair), None);
 }
 
 #[test]
-fn test_get_score_variance_single_entry() {
+fn test_score_variance_is_none_for_single_entry_not_zero() {
     let (env, client, _admin, _service) = initialized();
     let wallet = Address::generate(&env);
     let asset_pair = symbol_short!("XLM_USDC");
@@ -3583,7 +3645,9 @@ fn test_get_score_variance_single_entry() {
         &1,
         &None,
     );
-    assert_eq!(client.get_score_variance(&wallet, &asset_pair), 0);
+    // #58: one observation is not enough to compute a variance, and must be
+    // distinguishable from a wallet whose scores genuinely never varied.
+    assert_eq!(client.get_score_variance(&wallet, &asset_pair), None);
 }
 
 #[test]
@@ -3606,7 +3670,8 @@ fn test_get_score_variance_identical_scores() {
             &None,
         );
     }
-    assert_eq!(client.get_score_variance(&wallet, &asset_pair), 0);
+    // Four identical scores really do have zero variance, so this stays `Some(0)`.
+    assert_eq!(client.get_score_variance(&wallet, &asset_pair), Some(0));
 }
 
 #[test]
@@ -3630,7 +3695,7 @@ fn test_get_score_variance_known_values() {
             &None,
         );
     }
-    assert_eq!(client.get_score_variance(&wallet, &asset_pair), 500);
+    assert_eq!(client.get_score_variance(&wallet, &asset_pair), Some(500));
 }
 
 #[test]
@@ -3667,7 +3732,7 @@ fn test_get_score_variance_embargoed() {
     let admin = client.get_admin();
     env.ledger().with_mut(|l| l.timestamp += 1);
     client.set_score_embargo(&wallet, &None);
-    assert_eq!(client.get_score_variance(&wallet, &asset_pair), 0);
+    assert_eq!(client.get_score_variance(&wallet, &asset_pair), None);
 }
 
 // ── Differential privacy ──────────────────────────────────────────────────────

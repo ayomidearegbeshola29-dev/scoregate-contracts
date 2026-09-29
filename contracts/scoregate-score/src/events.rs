@@ -803,6 +803,12 @@ pub fn cluster_boundaries_updated(env: &Env) {
     env.events().publish((symbol_short!("clb_upd"),), ());
 }
 
+/// Emitted when an admin changes the dormancy decay configuration. `field` is
+/// `inactive` or `decay`; `value` is the new setting in seconds or bps.
+pub fn dormancy_config_updated(env: &Env, field: Symbol, value: u32) {
+    env.events().publish((symbol_short!("dorm_upd"), field), value);
+}
+
 pub fn epoch_opened(env: &Env, epoch_id: u32) {
     env.events().publish((symbol_short!("epo_open"),), epoch_id);
 }

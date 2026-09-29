@@ -3041,16 +3041,24 @@ impl ScoreGateScoreContract {
     /// Returns the population variance of the historical scores for
     /// `wallet` / `asset_pair`, scaled by 100 (i.e. `variance * 100`).
     ///
-    /// Returns `0` when there are fewer than 2 history entries, when the wallet
-    /// is embargoed, or when no history exists.
-    pub fn get_score_variance(env: Env, wallet: Address, asset_pair: Symbol) -> u64 {
+    /// Returns `None` when the variance cannot be computed: fewer than 2 history
+    /// entries, or an embargoed wallet. #58: this used to return `0`, which is
+    /// indistinguishable from a wallet whose scores genuinely never varied — a
+    /// brand new wallet looked exactly as stable as a long-standing consistent
+    /// one. Callers that need to tell the cases apart should match on `None`
+    /// rather than on a zero value.
+    pub fn get_score_variance(
+        env: Env,
+        wallet: Address,
+        asset_pair: Symbol,
+    ) -> Option<u64> {
         if storage::is_embargoed(&env, &wallet) {
-            return 0;
+            return None;
         }
         let history = storage::get_score_history(&env, &wallet, &asset_pair);
         let n = history.len() as u64;
         if n < 2 {
-            return 0;
+            return None;
         }
         let sum: u64 =
             (0..history.len()).filter_map(|i| history.get(i)).map(|r| r.score as u64).sum();
@@ -3063,7 +3071,7 @@ impl ScoreGateScoreContract {
                 diff * diff
             })
             .sum();
-        (sq_sum * 100) / n
+        Some((sq_sum * 100) / n)
     }
 
     /// Returns a windowed slice of the score history for `wallet` / `asset_pair`
@@ -4731,6 +4739,70 @@ impl ScoreGateScoreContract {
     /// Returns the currently configured cluster boundaries.
     pub fn get_cluster_boundaries(env: Env) -> Vec<u32> {
         storage::get_cluster_boundaries(&env)
+    }
+
+    /// Sets how long a wallet may go without a score before dormancy decay
+    /// starts to apply. Admin only.
+    ///
+    /// #283 / #55: the storage accessors for these two settings existed but
+    /// there was no way to reach them from the contract, so the keys were dead
+    /// weight in the config root and integrators had no way to configure the
+    /// feature at all.
+    ///
+    /// A value of `0` disables dormancy decay, which is the default.
+    ///
+    /// # Errors
+    /// - [`Error::NotInitialized`] if the contract has no admin yet.
+    /// - [`Error::Unauthorized`] if the signers do not authorise the change.
+    pub fn set_dormancy_inactivity_secs(
+        env: Env,
+        admin_signers: Vec<Address>,
+        secs: u64,
+    ) -> Result<(), Error> {
+        if !storage::has_admin(&env) {
+            return Err(Error::NotInitialized);
+        }
+        Self::require_admin_auth(&env, &admin_signers)?;
+        storage::set_dormancy_inactivity_secs(&env, secs);
+        events::dormancy_config_updated(&env, symbol_short!("inactive"), secs as u32);
+        Ok(())
+    }
+
+    /// Sets the fraction of a dormant wallet's score that is lost per decay
+    /// step, in basis points. Admin only.
+    ///
+    /// Must be at most 10_000 (100%); a larger value would remove more than the
+    /// whole score. `0` disables the decay step.
+    ///
+    /// # Errors
+    /// - [`Error::NotInitialized`] if the contract has no admin yet.
+    /// - [`Error::Unauthorized`] if the signers do not authorise the change.
+    /// - [`Error::InvalidThreshold`] if `bps` exceeds 10_000.
+    pub fn set_dormancy_decay_fraction_bps(
+        env: Env,
+        admin_signers: Vec<Address>,
+        bps: u32,
+    ) -> Result<(), Error> {
+        if !storage::has_admin(&env) {
+            return Err(Error::NotInitialized);
+        }
+        // Above 10_000 the decay would take the score below zero.
+        if bps > 10_000 {
+            return Err(Error::InvalidThreshold);
+        }
+        Self::require_admin_auth(&env, &admin_signers)?;
+        storage::set_dormancy_decay_fraction_bps(&env, bps);
+        events::dormancy_config_updated(&env, symbol_short!("decay"), bps);
+        Ok(())
+    }
+
+    /// Returns the dormancy configuration as `(inactivity_secs, decay_bps)`.
+    /// Both are `0` when dormancy decay has never been configured.
+    pub fn get_dormancy_config(env: Env) -> (u64, u32) {
+        (
+            storage::get_dormancy_inactivity_secs(&env),
+            storage::get_dormancy_decay_fraction_bps(&env),
+        )
     }
 
     /// Returns the cluster index for `wallet`, or `None` if no aggregate score
