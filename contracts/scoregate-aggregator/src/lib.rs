@@ -114,24 +114,20 @@ const MAX_ASSET_PAIR_BYTES: u32 = 9;
 /// [`REQUIRED_SHARD_CAPABILITIES`]. A shard that omits one, reports `false`, or
 /// does not expose `supports_interface` at all (an older or drifted build) is
 /// treated as incompatible.
+///
+/// Fix #115: compatibility is validated against the standard capability flags
+/// only — not auxiliary administrative methods such as `get_arch_owner` /
+/// `get_mandatory_reviewers` that valid shards may omit when deployed with
+/// different feature flags.
 fn shard_supports_required_interface(env: &Env, shard: &Address) -> bool {
     let client = scoregate_score::ScoreGateScoreContractClient::new(env, shard);
 
-    // 1. Verify standard capability flags
+    // Verify every required capability flag via supports_interface.
     for capability in REQUIRED_SHARD_CAPABILITIES {
         match client.try_supports_interface(&Symbol::new(env, capability)) {
             Ok(Ok(true)) => {}
             _ => return false,
         }
-    }
-
-    // 2. Interface validation: Verify getters exist and are callable
-    if client.try_get_arch_owner().is_err() {
-        return false;
-    }
-
-    if client.try_get_mandatory_reviewers().is_err() {
-        return false;
     }
 
     true
@@ -258,8 +254,14 @@ impl ScoreGateAggregator {
         // tests can detect post-registration capability downgrades.
         let snapshot = probe_capabilities(&env, &shard);
         env.storage().instance().set(&DataKey::ShardCapabilities(shard.clone()), &snapshot);
-        shards.push_back(shard);
+        shards.push_back(shard.clone());
         env.storage().instance().set(&DataKey::Shards, &shards);
+        // Fix #113: emit shard_added so indexers and monitoring can observe
+        // topology changes without polling the shard list.
+        env.events().publish(
+            (symbol_short!("sh_added"), shard),
+            env.ledger().timestamp(),
+        );
         Ok(())
     }
 
@@ -284,7 +286,13 @@ impl ScoreGateAggregator {
         }
         env.storage().instance().set(&DataKey::Shards, &out);
         env.storage().instance().remove(&DataKey::ShardHealth(shard.clone()));
-        env.storage().instance().remove(&DataKey::ShardCapabilities(shard));
+        env.storage().instance().remove(&DataKey::ShardCapabilities(shard.clone()));
+        // Fix #113: emit shard_removed so indexers and monitoring can observe
+        // topology changes without polling the shard list.
+        env.events().publish(
+            (symbol_short!("sh_rmvd"), shard),
+            env.ledger().timestamp(),
+        );
         Ok(())
     }
 
@@ -474,7 +482,11 @@ impl ScoreGateAggregator {
                 Ok(Ok(agg)) => match &best {
                     None => best = Some(agg),
                     Some(b) => {
-                        if agg.aggregate_score > b.aggregate_score {
+                        // Fix #114: prefer the observation with the most recent
+                        // last_updated timestamp rather than the highest score.
+                        // A stale high score from months ago must not override a
+                        // fresh, lower score from a more recent shard.
+                        if agg.last_updated > b.last_updated {
                             best = Some(agg);
                         }
                     }
@@ -529,9 +541,28 @@ impl ScoreGateAggregator {
                 continue;
             }
             let client = scoregate_score::ScoreGateScoreContractClient::new(&env, &shard);
+            // Fix #116: map each error arm distinctly instead of collapsing
+            // everything to None.  A contract-level error (e.g. ScoreNotFound)
+            // means the wallet genuinely has no score on that shard and is
+            // represented as None.  A transport/host error (trap, panic, WASM
+            // abort) is a shard failure and is recorded in LastShardFailure so
+            // monitoring tools can observe it — the entry is still pushed as
+            // None so callers get a complete per-shard result set.
             match client.try_get_score(&wallet, &asset_pair) {
                 Ok(Ok(score)) => out.push_back((shard.clone(), Some(score))),
-                _ => out.push_back((shard.clone(), None)),
+                Ok(Err(_contract_err)) => {
+                    // Contract returned a well-typed error (e.g. ScoreNotFound):
+                    // wallet has no score on this shard — not a shard failure.
+                    out.push_back((shard.clone(), None));
+                }
+                Err(_) => {
+                    // Host trap / transport failure — record as a shard failure
+                    // so operators can detect it via get_last_shard_failure.
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::LastShardFailure, &(shard.clone(), FAILURE_TRANSPORT));
+                    out.push_back((shard.clone(), None));
+                }
             }
         }
         out

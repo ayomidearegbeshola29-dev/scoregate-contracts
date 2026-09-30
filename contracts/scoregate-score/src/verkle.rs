@@ -207,45 +207,16 @@ pub fn finalize_commitment(env: &Env, accumulator: &[u8; 32]) -> [u8; 32] {
     env.crypto().sha256(&Bytes::from_array(env, &buf)).to_bytes().to_array()
 }
 
-/// Incorporate one `(z, v)` leaf into the running XOR accumulator.
-///
-/// The running commitment is maintained as a raw XOR accumulator of all live
-/// leaves:
-///
-/// ```text
-/// leaf_i     = H(0x02 || z || v)
-/// accumulator = accumulator XOR leaf_i
-/// ```
-///
-/// The commitment exposed to callers is `H(0x06 || accumulator)`, computed
-/// by [`finalize_commitment`].
-///
-/// **Removal** uses the same function: XOR is its own inverse, so to remove an
-/// entry, call `update_accumulator(env, &old_accum, z, old_v)` — the old leaf
-/// XORs out.
-pub fn update_accumulator(env: &Env, accum: &[u8; 32], z: &[u8; 32], v: &[u8; 32]) -> [u8; 32] {
+/// Update the running XOR accumulator with a new `(z, v)` pair.
+/// Hashes the leaf internally and XORs it into `accumulator`.
+pub fn update_accumulator(env: &Env, accumulator: &[u8; 32], z: &[u8; 32], v: &[u8; 32]) -> [u8; 32] {
     let leaf = hash_leaf(env, z, v);
-    xor32(accum, &leaf)
+    xor32(accumulator, &leaf)
 }
 
-// ─── Proof generation ─────────────────────────────────────────────────────────
-
-/// Compute the KZG-analog opening proof (witness) for a member entry.
-///
-/// ```text
-/// witness = SHA-256(0x03 || commitment || z || v)
-/// ```
-///
-/// The witness binds the evaluation point and value to the global commitment,
-/// analogous to the polynomial quotient `Q(x) = (f(x) - v) / (x - z)` in
-/// real KZG — here the "quotient" is derived from the hash.
-pub fn compute_membership_witness(
-    env: &Env,
-    commitment: &[u8; 32],
-    z: &[u8; 32],
-    v: &[u8; 32],
-) -> [u8; 32] {
-    let mut buf = [0u8; 97]; // 1 + 32 + 32 + 32
+/// Compute the opening witness for a membership proof.
+pub fn compute_membership_witness(env: &Env, commitment: &[u8; 32], z: &[u8; 32], v: &[u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 97];
     buf[0] = DOMAIN_WITNESS;
     buf[1..33].copy_from_slice(commitment);
     buf[33..65].copy_from_slice(z);
@@ -253,42 +224,28 @@ pub fn compute_membership_witness(
     env.crypto().sha256(&Bytes::from_array(env, &buf)).to_bytes().to_array()
 }
 
-/// Compute the KZG-analog opening proof for a **non-member** key.
-///
-/// Non-membership is proven by showing that the evaluation at `z` equals
-/// `NON_MEMBER_SENTINEL` (all-zeros) — a value that no valid score can produce
-/// (since `derive_value_element` always has a non-zero domain separator).
-///
-/// ```text
-/// witness = SHA-256(0x07 || commitment || z)
-/// ```
+/// Compute the opening witness for a non-membership proof.
 pub fn compute_nonmembership_witness(env: &Env, commitment: &[u8; 32], z: &[u8; 32]) -> [u8; 32] {
-    let mut buf = [0u8; 65]; // 1 + 32 + 32
+    let mut buf = [0u8; 65];
     buf[0] = DOMAIN_NONMEMBER;
     buf[1..33].copy_from_slice(commitment);
     buf[33..65].copy_from_slice(z);
     env.crypto().sha256(&Bytes::from_array(env, &buf)).to_bytes().to_array()
 }
 
-// ─── Proof encoding ───────────────────────────────────────────────────────────
+/// Verify a proof (membership or non-membership) against a commitment.
+pub fn verify_proof(env: &Env, commitment: &[u8; 32], z: &[u8; 32], v: &[u8; 32], witness: &[u8; 32]) -> bool {
+    let expected = if *v == NON_MEMBER_SENTINEL {
+        compute_nonmembership_witness(env, commitment, z)
+    } else {
+        compute_membership_witness(env, commitment, z, v)
+    };
+    *witness == expected
+}
 
-/// Serialise a membership proof into a `Bytes` payload:
-///
-/// ```text
-/// [0]       = proof_type: 0x01 (member) or 0x02 (non-member)
-/// [1..33]   = z (evaluation point, 32 bytes)
-/// [33..65]  = v (value element, 32 bytes; NON_MEMBER_SENTINEL for absence)
-/// [65..97]  = witness (32 bytes)
-/// ```
-///
-/// Total: 97 bytes.
-pub fn encode_proof(
-    env: &Env,
-    is_member: bool,
-    z: &[u8; 32],
-    v: &[u8; 32],
-    witness: &[u8; 32],
-) -> Bytes {
+/// Encode a proof blob: `proof_type(1) || z(32) || v(32) || witness(32)` = 97 bytes.
+/// `is_member=true` → type byte `0x01`; `false` → `0x02`.
+pub fn encode_proof(env: &Env, is_member: bool, z: &[u8; 32], v: &[u8; 32], witness: &[u8; 32]) -> Bytes {
     let mut buf = [0u8; 97];
     buf[0] = if is_member { 0x01 } else { 0x02 };
     buf[1..33].copy_from_slice(z);
@@ -297,17 +254,15 @@ pub fn encode_proof(
     Bytes::from_array(env, &buf)
 }
 
-/// `(is_member, z, v, witness)` as returned by [`decode_proof`].
-pub type DecodedProof = (bool, [u8; 32], [u8; 32], [u8; 32]);
-
-/// Deserialise a proof payload. Returns `(is_member, z, v, witness)` or
-/// `None` if the byte length is not exactly 97.
-pub fn decode_proof(proof: &Bytes) -> Option<DecodedProof> {
+/// Decode a proof blob produced by `encode_proof`.
+/// Returns `(is_member, z, v, witness)` or `None` if malformed.
+pub fn decode_proof(proof: &Bytes) -> Option<(bool, [u8; 32], [u8; 32], [u8; 32])> {
     if proof.len() != 97 {
         return None;
     }
-    let proof_type = proof.get(0)?;
-    let is_member = match proof_type {
+    // soroban_sdk::Bytes does not have to_array() — copy bytes individually.
+    let type_byte = proof.get(0)?;
+    let is_member = match type_byte {
         0x01 => true,
         0x02 => false,
         _ => return None,
@@ -323,68 +278,27 @@ pub fn decode_proof(proof: &Bytes) -> Option<DecodedProof> {
     Some((is_member, z, v, witness))
 }
 
-// ─── Commitment serialisation ─────────────────────────────────────────────────
-
-/// Expand a 32-byte internal commitment hash into a 48-byte `BytesN<48>`.
-///
-/// The BLS12-381 G1 compressed point is 48 bytes. We emulate this format:
-///
-/// ```text
-/// output[0..16]  = context prefix: b"SCOREGATE_KZG_V1" (16 bytes)
-/// output[16..48] = the 32-byte commitment hash
-/// ```
-///
-/// The context prefix encodes the curve tag and commitment version so proofs
-/// from different protocol versions are incompatible.
-pub fn commitment_to_bytes48(env: &Env, commit: &[u8; 32]) -> BytesN<48> {
-    let prefix: &[u8; 16] = b"SCOREGATE_KZG_V1";
-    let mut buf = [0u8; 48];
-    buf[0..16].copy_from_slice(prefix);
-    buf[16..48].copy_from_slice(commit);
-    BytesN::<48>::from_array(env, &buf)
-}
-
-/// Extract the inner 32-byte commitment hash from a 48-byte `BytesN<48>`.
-/// Returns `None` if the context prefix does not match (version mismatch).
-pub fn bytes48_to_commitment(b48: &BytesN<48>) -> Option<[u8; 32]> {
-    let arr = b48.to_array();
-    let prefix: &[u8; 16] = b"SCOREGATE_KZG_V1";
-    if &arr[0..16] != prefix {
+/// Convert a 48-byte encoded commitment back to its inner 32-byte hash.
+/// Returns `None` if the blob is malformed.
+pub fn bytes48_to_commitment(commitment: &BytesN<48>) -> Option<[u8; 32]> {
+    let buf = commitment.to_array();
+    // Check the header bytes we wrote in commitment_to_bytes48.
+    if buf[0] != 0x80 || buf[1] != 0x01 {
         return None;
     }
-    let mut commit = [0u8; 32];
-    commit.copy_from_slice(&arr[16..48]);
-    Some(commit)
+    let mut inner = [0u8; 32];
+    inner.copy_from_slice(&buf[16..48]);
+    Some(inner)
 }
 
-// ─── Proof verification ───────────────────────────────────────────────────────
-
-/// Verify a membership or non-membership proof against a known commitment.
-///
-/// # Membership verification (`v != NON_MEMBER_SENTINEL`)
-///
-/// 1. Recompute `expected_witness = SHA-256(0x03 || commitment || z || v)`.
-/// 2. Confirm `proof.witness == expected_witness`.
-///
-/// # Non-membership verification (`v == NON_MEMBER_SENTINEL`)
-///
-/// 1. Recompute `expected_witness = SHA-256(0x07 || commitment || z)`.
-/// 2. Confirm `proof.witness == expected_witness`.
-/// 3. Confirm `proof.v == NON_MEMBER_SENTINEL`.
-///
-/// Returns `true` iff the proof is valid.
-pub fn verify_proof(
-    env: &Env,
-    commitment: &[u8; 32],
-    z: &[u8; 32],
-    v: &[u8; 32],
-    witness: &[u8; 32],
-) -> bool {
-    let is_nonmember = *v == NON_MEMBER_SENTINEL;
-    let expected_witness = if is_nonmember {
-        compute_nonmembership_witness(env, commitment, z)
-    } else {
-        compute_membership_witness(env, commitment, z, v)
-    };
-    *witness == expected_witness
+/// Encode the 32-byte commitment as a 48-byte `BytesN<48>` matching the BLS12-381
+/// G1 compressed point format expected by callers: a 16-byte contextual prefix
+/// followed by the 32-byte hash.
+pub fn commitment_to_bytes48(env: &Env, commitment: &[u8; 32]) -> BytesN<48> {
+    let mut buf = [0u8; 48];
+    buf[0] = 0x80; // compressed-point flag (mirrors real BLS12-381 encoding)
+    buf[1] = 0x01; // version / context byte
+    // bytes 2..15 remain zero
+    buf[16..48].copy_from_slice(commitment);
+    BytesN::from_array(env, &buf)
 }

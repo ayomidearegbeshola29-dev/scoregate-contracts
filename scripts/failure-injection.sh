@@ -71,7 +71,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 50 \
       --benford-flag false \
       --ml-flag false \
@@ -118,7 +118,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 50 \
       --benford-flag false \
       --ml-flag false \
@@ -155,7 +155,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 50 \
       --benford-flag false \
       --ml-flag false \
@@ -173,7 +173,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 50 \
       --benford-flag false \
       --ml-flag false \
@@ -200,7 +200,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 0 \
       --benford-flag false \
       --ml-flag false \
@@ -218,7 +218,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 50 \
       --benford-flag false \
       --ml-flag false \
@@ -244,7 +244,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 101 \
       --benford-flag false \
       --ml-flag false \
@@ -262,7 +262,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 50 \
       --benford-flag false \
       --ml-flag false \
@@ -286,7 +286,7 @@ case "$SCENARIO" in
       --network "$NETWORK" \
       -- \
       set_pair_paused \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --paused true 2>&1 || true
 
     log "Scenario complete: unauthorized-caller"
@@ -307,7 +307,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 50 \
       --benford-flag false \
       --ml-flag false \
@@ -325,7 +325,7 @@ case "$SCENARIO" in
       submit_score \
       --signers "[]" \
       --wallet "$ADMIN_ADDRESS" \
-      --asset-pair INJECT_TEST \
+      --asset-pair INJ_TEST \
       --score 55 \
       --benford-flag false \
       --ml-flag false \
