@@ -590,13 +590,16 @@ fn random_amount(rng: &mut XorShift64) -> i128 {
 }
 
 fn random_pair(rng: &mut XorShift64) -> String {
-    const VALUES: [&str; 5] = [
-        "XLM_USDC",
-        "BTC_USDC",
-        "",
-        "12345678901234567890123456789012",
-        "123456789012345678901234567890123",
-    ];
+    // Bounded to 1..=9 ASCII characters (Issue #124): scoregate-score's own
+    // asset-pair validation (`constants::MAX_ASSET_PAIR_BYTES`) rejects
+    // anything longer, so values beyond that bound never reach AmmSwap /
+    // LendingBorrow / AggregatorGate business logic — they only spend the
+    // fuzzing budget on a predictable early rejection. The harness's
+    // separate wire-format boundary (`MAX_SYMBOL_BYTES` = 32, the actual
+    // Soroban Symbol object limit) already has dedicated, deterministic
+    // coverage via `invalid_symbol_is_classified_without_soroban_allocation`,
+    // so it doesn't need representation here too.
+    const VALUES: [&str; 5] = ["XLM_USDC", "BTC_USDC", "ETH_USDC", "X", "ABCDEFGHI"];
     VALUES[rng.index(VALUES.len())].to_owned()
 }
 

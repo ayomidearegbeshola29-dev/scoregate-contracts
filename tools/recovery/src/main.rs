@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
@@ -108,9 +108,11 @@ enum Commands {
         timestamp: u64,
     },
 
-    /// Export score entries to a JSON lines file (one entry per line).
-    /// This is an off-chain helper; use the contract's export_all_scores_paginated
-    /// to fetch the actual data from the chain.
+    /// Export score entries to a JSON file containing a single top-level
+    /// array of entries (not NDJSON/JSON-lines — this differs from the
+    /// replay harness's NDJSON snapshot format in tools/replay). This is an
+    /// off-chain helper; use the contract's export_all_scores_paginated to
+    /// fetch the actual data from the chain.
     Export {
         /// Path to save the export JSON to.
         #[arg(short, long, default_value = "export.json")]
@@ -243,6 +245,14 @@ fn cmd_export(output: &PathBuf, input: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// First `max` bytes of `s`, or the whole string if it's shorter. Plain byte
+/// slicing (`&s[..n]`) panics on an empty or short root string — which a
+/// corrupt or uninitialized snapshot can genuinely produce (Issue #122) —
+/// so this bounds `n` to what the string actually has.
+fn truncated<'a>(s: &'a str, max: usize) -> &'a str {
+    &s[..s.len().min(max)]
+}
+
 fn cmd_reconcile(snapshot_a: &PathBuf, snapshot_b: &PathBuf, output: &PathBuf) -> Result<()> {
     let snap_a: StateSnapshot = load_snapshot(snapshot_a)?;
     let snap_b: StateSnapshot = load_snapshot(snapshot_b)?;
@@ -257,20 +267,20 @@ fn cmd_reconcile(snapshot_a: &PathBuf, snapshot_b: &PathBuf, output: &PathBuf) -
 
     details.push(format!(
         "Score root: {} == {} → {}",
-        &snap_a.score_root[..16],
-        &snap_b.score_root[..16],
+        truncated(&snap_a.score_root, 16),
+        truncated(&snap_b.score_root, 16),
         if score_match { "MATCH" } else { "DIVERGE" }
     ));
     details.push(format!(
         "Config root: {} == {} → {}",
-        &snap_a.config_root[..16],
-        &snap_b.config_root[..16],
+        truncated(&snap_a.config_root, 16),
+        truncated(&snap_b.config_root, 16),
         if config_match { "MATCH" } else { "DIVERGE" }
     ));
     details.push(format!(
         "Auth root: {} == {} → {}",
-        &snap_a.auth_root[..16],
-        &snap_b.auth_root[..16],
+        truncated(&snap_a.auth_root, 16),
+        truncated(&snap_b.auth_root, 16),
         if auth_match { "MATCH" } else { "DIVERGE" }
     ));
     details.push(format!(
@@ -428,4 +438,59 @@ fn chrono_now() -> String {
         minutes,
         seconds
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_snapshot(dir: &Path, name: &str, snapshot: &StateSnapshot) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, serde_json::to_string(snapshot).unwrap()).unwrap();
+        path
+    }
+
+    // Issue #122: cmd_reconcile used to slice each root string with a fixed
+    // `[..16]`, which panics on any root shorter than 16 bytes — a real
+    // possibility for an uninitialized or corrupt snapshot, not just a
+    // theoretical one. This confirms it now degrades to showing the whole
+    // (short) string instead of panicking.
+    #[test]
+    fn reconcile_does_not_panic_on_short_root_strings() {
+        let dir = std::env::temp_dir().join(format!("recovery_test_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let short = StateSnapshot {
+            score_root: String::new(),
+            config_root: "ab".to_string(),
+            auth_root: "abcdefgh".to_string(),
+            entry_count: 0,
+            ledger_seq: 1,
+            timestamp: 1,
+        };
+        let full = StateSnapshot {
+            score_root: "a".repeat(64),
+            config_root: "b".repeat(64),
+            auth_root: "c".repeat(64),
+            entry_count: 0,
+            ledger_seq: 1,
+            timestamp: 1,
+        };
+
+        let path_a = write_snapshot(&dir, "a.json", &short);
+        let path_b = write_snapshot(&dir, "b.json", &full);
+        let output = dir.join("report.json");
+
+        let result = cmd_reconcile(&path_a, &path_b, &output);
+
+        fs::remove_dir_all(&dir).ok();
+        result.expect("reconcile must not panic on short root strings");
+    }
+
+    #[test]
+    fn truncated_handles_strings_shorter_than_max() {
+        assert_eq!(truncated("", 16), "");
+        assert_eq!(truncated("abc", 16), "abc");
+        assert_eq!(truncated(&"x".repeat(64), 16), "x".repeat(16));
+    }
 }
