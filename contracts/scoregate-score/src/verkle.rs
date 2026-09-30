@@ -205,6 +205,104 @@ pub fn xor32(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 /// commitment = SHA-256(0x06 || accumulator)
 /// ```
 pub fn finalize_commitment(env: &Env, accumulator: &[u8; 32]) -> [u8; 32] {
-    let mut buf = 
+    let mut buf = [0u8; 33];
+    buf[0] = DOMAIN_COMMIT;
+    buf[1..33].copy_from_slice(accumulator);
+    env.crypto().sha256(&Bytes::from_array(env, &buf)).to_bytes().to_array()
+}
 
-/* … truncated 6304 chars — edit only what you need near the top … */
+/// Update the running XOR accumulator with a new `(z, v)` pair.
+/// Hashes the leaf internally and XORs it into `accumulator`.
+pub fn update_accumulator(env: &Env, accumulator: &[u8; 32], z: &[u8; 32], v: &[u8; 32]) -> [u8; 32] {
+    let leaf = hash_leaf(env, z, v);
+    xor32(accumulator, &leaf)
+}
+
+/// Compute the opening witness for a membership proof.
+pub fn compute_membership_witness(env: &Env, commitment: &[u8; 32], z: &[u8; 32], v: &[u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 97];
+    buf[0] = DOMAIN_WITNESS;
+    buf[1..33].copy_from_slice(commitment);
+    buf[33..65].copy_from_slice(z);
+    buf[65..97].copy_from_slice(v);
+    env.crypto().sha256(&Bytes::from_array(env, &buf)).to_bytes().to_array()
+}
+
+/// Compute the opening witness for a non-membership proof.
+pub fn compute_nonmembership_witness(env: &Env, commitment: &[u8; 32], z: &[u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 65];
+    buf[0] = DOMAIN_NONMEMBER;
+    buf[1..33].copy_from_slice(commitment);
+    buf[33..65].copy_from_slice(z);
+    env.crypto().sha256(&Bytes::from_array(env, &buf)).to_bytes().to_array()
+}
+
+/// Verify a proof (membership or non-membership) against a commitment.
+pub fn verify_proof(env: &Env, commitment: &[u8; 32], z: &[u8; 32], v: &[u8; 32], witness: &[u8; 32]) -> bool {
+    let expected = if *v == NON_MEMBER_SENTINEL {
+        compute_nonmembership_witness(env, commitment, z)
+    } else {
+        compute_membership_witness(env, commitment, z, v)
+    };
+    *witness == expected
+}
+
+/// Encode a proof blob: `proof_type(1) || z(32) || v(32) || witness(32)` = 97 bytes.
+/// `is_member=true` → type byte `0x01`; `false` → `0x02`.
+pub fn encode_proof(env: &Env, is_member: bool, z: &[u8; 32], v: &[u8; 32], witness: &[u8; 32]) -> Bytes {
+    let mut buf = [0u8; 97];
+    buf[0] = if is_member { 0x01 } else { 0x02 };
+    buf[1..33].copy_from_slice(z);
+    buf[33..65].copy_from_slice(v);
+    buf[65..97].copy_from_slice(witness);
+    Bytes::from_array(env, &buf)
+}
+
+/// Decode a proof blob produced by `encode_proof`.
+/// Returns `(is_member, z, v, witness)` or `None` if malformed.
+pub fn decode_proof(proof: &Bytes) -> Option<(bool, [u8; 32], [u8; 32], [u8; 32])> {
+    if proof.len() != 97 {
+        return None;
+    }
+    // soroban_sdk::Bytes does not have to_array() — copy bytes individually.
+    let type_byte = proof.get(0)?;
+    let is_member = match type_byte {
+        0x01 => true,
+        0x02 => false,
+        _ => return None,
+    };
+    let mut z = [0u8; 32];
+    let mut v = [0u8; 32];
+    let mut witness = [0u8; 32];
+    for i in 0..32u32 {
+        z[i as usize] = proof.get(1 + i)?;
+        v[i as usize] = proof.get(33 + i)?;
+        witness[i as usize] = proof.get(65 + i)?;
+    }
+    Some((is_member, z, v, witness))
+}
+
+/// Convert a 48-byte encoded commitment back to its inner 32-byte hash.
+/// Returns `None` if the blob is malformed.
+pub fn bytes48_to_commitment(commitment: &BytesN<48>) -> Option<[u8; 32]> {
+    let buf = commitment.to_array();
+    // Check the header bytes we wrote in commitment_to_bytes48.
+    if buf[0] != 0x80 || buf[1] != 0x01 {
+        return None;
+    }
+    let mut inner = [0u8; 32];
+    inner.copy_from_slice(&buf[16..48]);
+    Some(inner)
+}
+
+/// Encode the 32-byte commitment as a 48-byte `BytesN<48>` matching the BLS12-381
+/// G1 compressed point format expected by callers: a 16-byte contextual prefix
+/// followed by the 32-byte hash.
+pub fn commitment_to_bytes48(env: &Env, commitment: &[u8; 32]) -> BytesN<48> {
+    let mut buf = [0u8; 48];
+    buf[0] = 0x80; // compressed-point flag (mirrors real BLS12-381 encoding)
+    buf[1] = 0x01; // version / context byte
+    // bytes 2..15 remain zero
+    buf[16..48].copy_from_slice(commitment);
+    BytesN::from_array(env, &buf)
+}

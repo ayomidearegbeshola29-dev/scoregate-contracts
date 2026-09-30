@@ -1,6 +1,6 @@
 #![cfg_attr(target_family = "wasm", allow(dead_code))]
 
-use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 use crate::types::{AlertAckRecord, AlertType, Policy, RiskScore};
 

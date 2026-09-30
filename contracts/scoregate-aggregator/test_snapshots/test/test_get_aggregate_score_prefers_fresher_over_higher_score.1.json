@@ -45,7 +45,7 @@
                   "symbol": "XLM_USDC"
                 },
                 {
-                  "u32": 50
+                  "u32": 80
                 },
                 {
                   "bool": false
@@ -54,7 +54,7 @@
                   "bool": false
                 },
                 {
-                  "u64": 100
+                  "u64": 50
                 },
                 {
                   "u32": 90
@@ -111,7 +111,7 @@
                   "symbol": "XLM_USDC"
                 },
                 {
-                  "u32": 90
+                  "u32": 30
                 },
                 {
                   "bool": false
@@ -120,7 +120,7 @@
                   "bool": false
                 },
                 {
-                  "u64": 50
+                  "u64": 1000
                 },
                 {
                   "u32": 90
@@ -455,7 +455,7 @@
                         "symbol": "score"
                       },
                       "val": {
-                        "u32": 50
+                        "u32": 80
                       }
                     },
                     {
@@ -463,7 +463,7 @@
                         "symbol": "timestamp"
                       },
                       "val": {
-                        "u64": 100
+                        "u64": 50
                       }
                     }
                   ]
@@ -745,7 +745,7 @@
                             "symbol": "score"
                           },
                           "val": {
-                            "u32": 50
+                            "u32": 80
                           }
                         },
                         {
@@ -753,7 +753,7 @@
                             "symbol": "timestamp"
                           },
                           "val": {
-                            "u64": 100
+                            "u64": 50
                           }
                         }
                       ]
@@ -1640,7 +1640,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "b25e3857d489f917fb950f4cc5f3b7a81d7bd6683478a83a2fddfef72f2e3e24"
+                  "bytes": "d40caa98cb3a7915455b6bfb56fb46fc253d2bdccef30c25b1312afed50bed88"
                 }
               }
             },
@@ -1741,7 +1741,7 @@
                           ]
                         },
                         "val": {
-                          "bytes": "b25e3857d489f917fb950f4cc5f3b7a81d7bd6683478a83a2fddfef72f2e3e24"
+                          "bytes": "d40caa98cb3a7915455b6bfb56fb46fc253d2bdccef30c25b1312afed50bed88"
                         }
                       }
                     ]
@@ -2075,7 +2075,7 @@
                         "symbol": "score"
                       },
                       "val": {
-                        "u32": 90
+                        "u32": 30
                       }
                     },
                     {
@@ -2083,7 +2083,7 @@
                         "symbol": "timestamp"
                       },
                       "val": {
-                        "u64": 50
+                        "u64": 1000
                       }
                     }
                   ]
@@ -2365,7 +2365,7 @@
                             "symbol": "score"
                           },
                           "val": {
-                            "u32": 90
+                            "u32": 30
                           }
                         },
                         {
@@ -2373,7 +2373,7 @@
                             "symbol": "timestamp"
                           },
                           "val": {
-                            "u64": 50
+                            "u64": 1000
                           }
                         }
                       ]
@@ -3260,7 +3260,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "827fba3a4eebf867770a341fc1e2483e4a277091cad3b42c9bf652319f9f883f"
+                  "bytes": "cb1ef939b33e4bc0d77d7b9646d67f159b6ba061b969223ca2b39ba84abcd42d"
                 }
               }
             },
@@ -3361,7 +3361,7 @@
                           ]
                         },
                         "val": {
-                          "bytes": "827fba3a4eebf867770a341fc1e2483e4a277091cad3b42c9bf652319f9f883f"
+                          "bytes": "cb1ef939b33e4bc0d77d7b9646d67f159b6ba061b969223ca2b39ba84abcd42d"
                         }
                       }
                     ]
@@ -3593,7 +3593,7 @@
                   "symbol": "XLM_USDC"
                 },
                 {
-                  "u32": 50
+                  "u32": 80
                 },
                 {
                   "bool": false
@@ -3602,7 +3602,7 @@
                   "bool": false
                 },
                 {
-                  "u64": 100
+                  "u64": 50
                 },
                 {
                   "u32": 90
@@ -3642,7 +3642,7 @@
             "data": {
               "vec": [
                 {
-                  "u32": 50
+                  "u32": 80
                 },
                 {
                   "bool": false
@@ -3654,7 +3654,7 @@
                   "u32": 90
                 },
                 {
-                  "u64": 100
+                  "u64": 50
                 }
               ]
             }
@@ -3768,7 +3768,7 @@
                   "symbol": "XLM_USDC"
                 },
                 {
-                  "u32": 90
+                  "u32": 30
                 },
                 {
                   "bool": false
@@ -3777,7 +3777,7 @@
                   "bool": false
                 },
                 {
-                  "u64": 50
+                  "u64": 1000
                 },
                 {
                   "u32": 90
@@ -3817,7 +3817,7 @@
             "data": {
               "vec": [
                 {
-                  "u32": 90
+                  "u32": 30
                 },
                 {
                   "bool": false
@@ -3829,7 +3829,7 @@
                   "u32": 90
                 },
                 {
-                  "u64": 50
+                  "u64": 1000
                 }
               ]
             }

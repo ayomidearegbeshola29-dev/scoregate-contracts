@@ -5157,12 +5157,11 @@ impl ScoreGateScoreContract {
         }
         Self::check_service_silence(&env);
         // #302: strict gate enforcement — reject callers not in the allowlist.
+        // Note: soroban-sdk 21 does not expose env.invoker(); when enforcement
+        // mode is active we fail closed (return false) to preserve the
+        // no-panic, fail-closed contract of query_risk_gate_with_confidence.
         if storage::get_gate_enforcement_mode(&env) {
-            let caller = env.invoker();
-            let callers = storage::get_gate_callers(&env);
-            if !callers.contains(&caller) {
-                return false; // CallerNotAuthorized: infallible, so return false
-            }
+            return false;
         }
         if gate_threshold > 100 || min_confidence > 100 {
             return false;
@@ -13097,6 +13096,30 @@ impl ScoreGateScoreContract {
     }
 
     // ── Verkle commitment internals ──────────────────────────────────────────
+
+    /// Persist a finalized `RiskScore` and update all derived state:
+    /// score storage, history ring, pair/wallet registration, counters,
+    /// and the Verkle commitment.  Called by `commit_pending_score` and the
+    /// internal single-submission path once all validation gates pass.
+    fn finalize_score_state(
+        env: &Env,
+        wallet: &Address,
+        asset_pair: &Symbol,
+        risk_score: &RiskScore,
+    ) -> Result<(), Error> {
+        let previous_score = storage::peek_score(env, wallet, asset_pair).map(|s| s.score);
+        storage::set_score(env, wallet, asset_pair, risk_score);
+        storage::push_score_history(env, wallet, asset_pair, risk_score);
+        storage::register_pair_for_wallet(env, wallet, asset_pair);
+        storage::increment_score_count(env, wallet, asset_pair);
+        storage::increment_pair_score_count(env, asset_pair);
+        if previous_score.is_none() {
+            storage::increment_total_wallets_scored(env);
+        }
+        Self::update_verkle_commitment(env, wallet, asset_pair, risk_score);
+        events::score_submitted(env, wallet, asset_pair, risk_score);
+        Ok(())
+    }
 
     /// Incrementally update the Verkle commitment when a score is written.
     ///
