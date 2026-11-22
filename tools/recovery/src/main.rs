@@ -8,17 +8,31 @@
 //! * `snapshot` — Take a deterministic state snapshot (invokes
 //!   `compute_state_checksum` on-chain, saves the result to disk).
 //! * `export` — Export all scored entries as a JSON file for off-chain backup.
-//! * `reconcile` — Compare two snapshot files and produce a diff report.
+//! * `reconcile` — Compare two snapshot files and produce a diff report. With `--strict` it also
+//!   exits with status 3 when the snapshots differ.
 //! * `verify` — Verify a saved snapshot against the current on-chain state.
 //! * `report` — Generate a post-action verification report from a snapshot
 //!   and an export.
+//!
+//! ## Exit status
+//!
+//! * `0` — success. `reconcile` also exits 0 for snapshots that differ unless `--strict` is given.
+//! * `1` — the command failed, for example a snapshot that is missing or is not valid JSON.
+//! * `2` — invalid command-line usage (reported by the argument parser).
+//! * `3` — `reconcile --strict` read both snapshots and found a difference in a root or in the
+//!   entry count. The report is written first.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+
+/// Exit status of `reconcile --strict` when the snapshots differ. It is distinct from 1 (a failed
+/// command, such as malformed input) and 2 (usage errors from the argument parser).
+const EXIT_SNAPSHOTS_DIVERGE: u8 = 3;
 
 // ── Data types (mirrors on-chain types for off-chain processing) ────────────
 
@@ -132,6 +146,11 @@ enum Commands {
         /// Path to save the reconciliation report.
         #[arg(short, long, default_value = "reconciliation-report.json")]
         output: PathBuf,
+        /// Exit with status 3 when the snapshots differ in any root or in the entry count. The
+        /// report is still written. Without this flag a difference is reported but the exit status
+        /// is 0. Unreadable or malformed snapshots always fail with status 1.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Verify that a snapshot file has internally consistent roots.
@@ -162,7 +181,7 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Snapshot {
@@ -181,16 +200,20 @@ fn main() -> Result<()> {
             entry_count,
             ledger_seq,
             timestamp,
-        ),
-        Commands::Export { output, input } => cmd_export(&output, input.as_deref()),
-        Commands::Reconcile { snapshot_a, snapshot_b, output } => {
-            cmd_reconcile(&snapshot_a, &snapshot_b, &output)
+        )?,
+        Commands::Export { output, input } => cmd_export(&output, input.as_deref())?,
+        Commands::Reconcile { snapshot_a, snapshot_b, output, strict } => {
+            let all_match = cmd_reconcile(&snapshot_a, &snapshot_b, &output)?;
+            if strict && !all_match {
+                return Ok(ExitCode::from(EXIT_SNAPSHOTS_DIVERGE));
+            }
         }
-        Commands::Verify { snapshot, export } => cmd_verify(&snapshot, export.as_deref()),
+        Commands::Verify { snapshot, export } => cmd_verify(&snapshot, export.as_deref())?,
         Commands::Report { snapshot, action, description, output } => {
-            cmd_report(&snapshot, &action, &description, &output)
+            cmd_report(&snapshot, &action, &description, &output)?
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 // ── Command handlers ───────────────────────────────────────────────────────
@@ -253,7 +276,10 @@ fn truncated<'a>(s: &'a str, max: usize) -> &'a str {
     &s[..s.len().min(max)]
 }
 
-fn cmd_reconcile(snapshot_a: &PathBuf, snapshot_b: &PathBuf, output: &PathBuf) -> Result<()> {
+/// Compares two snapshots and writes the report. Returns whether every root and the entry count
+/// match, so the caller can decide whether a difference is a failure; the report is written either
+/// way. Unreadable or malformed snapshots are an error.
+fn cmd_reconcile(snapshot_a: &PathBuf, snapshot_b: &PathBuf, output: &PathBuf) -> Result<bool> {
     let snap_a: StateSnapshot = load_snapshot(snapshot_a)?;
     let snap_b: StateSnapshot = load_snapshot(snapshot_b)?;
 
@@ -324,7 +350,7 @@ fn cmd_reconcile(snapshot_a: &PathBuf, snapshot_b: &PathBuf, output: &PathBuf) -
         }
     }
     eprintln!("Report saved to {}", output.display());
-    Ok(())
+    Ok(all_match)
 }
 
 fn cmd_verify(snapshot_path: &PathBuf, export_path: Option<&Path>) -> Result<()> {

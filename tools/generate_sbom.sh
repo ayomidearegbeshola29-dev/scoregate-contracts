@@ -29,21 +29,50 @@ if ! command -v cargo-cyclonedx >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "==> Cleaning stale SBOMs prior to generation"
+rm -rf target/sbom
+mkdir -p target/sbom
+find . -name '*.cdx.json' -not -path './target/*' -delete 2>/dev/null || true
+
 echo "==> Generating CycloneDX SBOMs for wasm32-unknown-unknown target"
 cargo cyclonedx --target wasm32-unknown-unknown --format json
 
 echo "==> Collecting SBOMs into target/sbom"
-rm -rf target/sbom
-mkdir -p target/sbom
-for f in $(find . -name '*.cdx.json' -not -path './target/*'); do
-  cp "$f" "target/sbom/$(basename "$f")"
-done
+python3 - <<'EOF'
+import json, subprocess, os, shutil, sys
+
+try:
+    meta_raw = subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"], text=True)
+    metadata = json.loads(meta_raw)
+    packages = [(pkg["name"], os.path.dirname(pkg["manifest_path"])) for pkg in metadata["packages"]]
+except Exception:
+    packages = [
+        ("scoregate-score", "contracts/scoregate-score"),
+        ("scoregate-aggregator", "contracts/scoregate-aggregator"),
+        ("scoregate-test-support", "contracts/scoregate-test-support"),
+        ("mock-amm", "contracts/mock-amm"),
+        ("mock-lending", "contracts/mock-lending"),
+        ("replay", "tools/replay"),
+        ("recovery", "tools/recovery"),
+        ("schema-gen", "tools/schema-gen"),
+        ("invocation-fuzzer", "tools/invocation-fuzzer"),
+        ("composability", "tests/composability"),
+    ]
+
+seen = set()
+for name, pkg_dir in packages:
+    cdx_path = os.path.join(pkg_dir, f"{name}.cdx.json")
+    if os.path.isfile(cdx_path):
+        dest_filename = f"{name}.cdx.json"
+        if dest_filename in seen:
+            sys.exit(f"ERROR: Collision detected for destination {dest_filename}")
+        seen.add(dest_filename)
+        shutil.copy2(cdx_path, os.path.join("target/sbom", dest_filename))
 
 # The released contract's own dependency graph must be present.
-if [ ! -f target/sbom/scoregate-score.cdx.json ]; then
-  echo "ERROR: scoregate-score.cdx.json not generated" >&2
-  exit 1
-fi
+if not os.path.isfile("target/sbom/scoregate-score.cdx.json"):
+    sys.exit("ERROR: scoregate-score.cdx.json not generated")
+EOF
 
 echo "==> Validating SBOMs are well-formed CycloneDX JSON"
 for f in target/sbom/*.cdx.json; do

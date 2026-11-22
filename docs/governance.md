@@ -177,7 +177,7 @@ Recommended operator limits:
 
 | `param_key` symbol | Direct setter | `new_value` encoding |
 |--------------------|---------------|----------------------|
-| `cooldown` | `set_cooldown` | 8-byte big-endian `u64` (seconds) |
+| `cooldown` | `set_cooldown` (immediate), `propose_cooldown_change` (delayed) | 8-byte big-endian `u64` (seconds) |
 | `hist_dep` | `set_history_max_depth` | 4-byte big-endian `u32` |
 | `decay_rt` | `set_decay_rate` | 8 bytes: numerator `u32` BE + denominator `u32` BE |
 | `vel_cap` | `set_score_velocity_cap` | 1 byte enabled (`0`/`1`) + 4-byte `u32` points/hour |
@@ -348,7 +348,10 @@ documented above.
 Both fields are validated before anything is stored: an invalid
 `risk_threshold` (>100) or `cooldown_secs` (outside
 `[MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS]`) rejects the whole proposal, so
-there is no partial proposal. `apply_policy_bundle` writes both fields in the
+there is no partial proposal. A `risk_threshold` that is not above the active
+hysteresis margin is rejected as well (see
+[Hysteresis and risk threshold changes](#hysteresis-and-risk-threshold-changes)),
+and the same check runs again in `apply_policy_bundle`. `apply_policy_bundle` writes both fields in the
 same call, so no caller can observe one field updated while the other is
 still pending. If an erroneous bundle is proposed, the admin multi-sig can
 revoke it prior to execution via `veto_policy_bundle`.
@@ -362,12 +365,60 @@ revoke it prior to execution via `veto_policy_bundle`.
 ## Time-Locked Parameter Setters (`apply_param_change`)
 
 Direct parameter setters (`set_risk_threshold`, `set_history_max_depth`,
-`set_upgrade_delay`, `set_cooldown`, and `set_staleness_window`) record a
-time-locked `ParamChangeProposal` keyed by parameter symbol (`risk_thr`,
-`hist_dep`, `upg_dly`, `cooldown`, `stale_w`) and emit `pc_prop`. Once
-`apply_after` has elapsed, calling `apply_param_change(key)` applies the new
-parameter value, clears the pending entry, and emits `pc_appl`
+`set_upgrade_delay`, `propose_cooldown_change`, and `set_staleness_window`)
+record a time-locked `ParamChangeProposal` keyed by parameter symbol
+(`risk_thr`, `hist_dep`, `upg_dly`, `cooldown`, `stale_w`) and emit `pc_prop`.
+Once `apply_after` has elapsed, calling `apply_param_change(key)` applies the
+new parameter value, clears the pending entry, and emits `pc_appl`
 (`param_change_applied`) carrying `(key, new_value)`.
+
+### Cooldown: immediate and delayed changes
+
+The submission cooldown has two entry points with different timing. They are
+kept apart so that pending state and events always describe what happened.
+
+| | `set_cooldown` (legacy) | `propose_cooldown_change` |
+|---|---|---|
+| Takes effect | immediately | at `apply_param_change(cooldown)`, once `apply_after` has elapsed |
+| `get_cooldown()` after the call | the new value | the old value, until applied |
+| Pending `cooldown` proposal | none created; one made by `propose_cooldown_change` is cancelled | created |
+| Events | `cd_upd` | `pc_prop`, then `pc_appl` and `cd_upd` when applied |
+| Second call while one is pending | allowed | `ParamChangeAlreadyPending` |
+
+Migration:
+
+- **Existing clients** keep calling `set_cooldown` and see the same effective
+  timing as before: the new value is in force when the call returns. What
+  changed is that the call no longer also leaves a pending `cooldown` proposal
+  and a `pc_prop` event, which used to re-apply the same value after the time
+  lock and suggested a delay that did not exist. Tools that watched `pc_prop`
+  for cooldown changes should watch `cd_upd` for immediate changes.
+- **New clients** that want a delayed change call `propose_cooldown_change`.
+  A proposal is cleared when it is applied or when `set_cooldown` is called
+  after it; the cooldown stays at its previous value until then.
+- `apply_param_change(cooldown)` and `propose_parameter_change` with the
+  `cooldown` key are unchanged.
+
+### Hysteresis and risk threshold changes
+
+A wallet leaves the high-risk band for `score < risk_threshold - hysteresis_margin`.
+When the margin is not below the threshold no score satisfies that, so wallets
+already in the band could never leave it. Every path that changes the threshold
+therefore keeps `margin < risk_threshold` whenever the margin is above 0, and
+fails with `InvalidHysteresisMargin` otherwise:
+
+| Path | When it is checked |
+|------|--------------------|
+| `set_risk_threshold` | at proposal, against the margin then in force |
+| `propose_policy_bundle` | at proposal, against the margin then in force |
+| `apply_param_change(risk_thr)` | at execution, against the margin in force now |
+| `apply_policy_bundle` | at execution, against the margin in force now |
+| `set_hysteresis_margin` | against the current threshold (unchanged) |
+
+The margin changes immediately while a threshold change waits out its time lock,
+so the check at execution is the one that closes the gap. A change that fails it
+stays pending: lower the margin with `set_hysteresis_margin` and apply it again,
+or let it be vetoed. A margin of 0 has no hysteresis and never conflicts.
 
 ## Mandatory Technical Reviewers
 

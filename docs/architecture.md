@@ -51,7 +51,7 @@ instance storage (`DataKey::PendingParamChange(key)`) with
 | `risk_thr` | `set_risk_threshold` | `ParamValue::U32(threshold)` | `DataKey::RiskThreshold` |
 | `hist_dep` | `set_history_max_depth` | `ParamValue::U32(depth)` | `DataKey::HistoryMaxDepth` |
 | `upg_dly` | `set_upgrade_delay` | `ParamValue::U64(delay_secs)` | `DataKey::UpgradeDelaySecs` |
-| `cooldown` | `set_cooldown` | `ParamValue::U64(secs)` | `DataKey::CooldownSecs` |
+| `cooldown` | `propose_cooldown_change` (`set_cooldown` applies immediately and stages nothing) | `ParamValue::U64(secs)` | `DataKey::CooldownSecs` |
 | `stale_w` | `set_staleness_window` | `ParamValue::U64(window_secs)` | `DataKey::StalenessWindowSecs` |
 
 Once `env.ledger().timestamp() >= proposal.apply_after` (and all mandatory

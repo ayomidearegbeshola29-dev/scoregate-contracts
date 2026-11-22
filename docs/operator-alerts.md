@@ -378,6 +378,6 @@ event_stream watch --topic="upg_*" --alert-on=all
 ## Support & Questions
 
 For alert rule questions or to report false positives:
-1. Check the [Operator FAQ](./operator-faq.md)
+1. Check the [operations runbook](./ops-runbook.md), which covers the failure scenarios behind these alerts
 2. Review event schema in [contracts/scoregate-score/src/events.rs](../contracts/scoregate-score/src/events.rs)
 3. File an issue with event logs and context

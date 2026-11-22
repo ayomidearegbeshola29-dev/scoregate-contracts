@@ -14,10 +14,16 @@ use soroban_sdk::{symbol_short, Address, Env, Symbol};
 /// that isn't purely additive.
 pub const EVENT_VERSION: u32 = 1;
 
+/// Topic symbol used by `swap_executed`.
+pub const SWAP_EXECUTED_TOPIC: Symbol = symbol_short!("swap_exc");
+
+/// Topic symbol used by `liquidity_provided`.
+pub const LIQUIDITY_PROVIDED_TOPIC: Symbol = symbol_short!("liq_prov");
+
 /// Emitted when `swap` clears the risk gate and completes.
 pub fn swap_executed(env: &Env, user: &Address, asset_pair: &Symbol, amount: i128) {
     env.events().publish(
-        (symbol_short!("swap_exc"), EVENT_VERSION, asset_pair.clone()),
+        (SWAP_EXECUTED_TOPIC, EVENT_VERSION, asset_pair.clone()),
         (user.clone(), amount),
     );
 }
@@ -25,7 +31,7 @@ pub fn swap_executed(env: &Env, user: &Address, asset_pair: &Symbol, amount: i12
 /// Emitted when `provide_liquidity_gated` clears the risk gate and completes.
 pub fn liquidity_provided(env: &Env, provider: &Address, asset_pair: &Symbol, amount: i128) {
     env.events().publish(
-        (symbol_short!("liq_prov"), EVENT_VERSION, asset_pair.clone()),
+        (LIQUIDITY_PROVIDED_TOPIC, EVENT_VERSION, asset_pair.clone()),
         (provider.clone(), amount),
     );
 }

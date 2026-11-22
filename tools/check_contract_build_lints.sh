@@ -5,6 +5,8 @@ set -euo pipefail
 PACKAGES=(
   scoregate-score
   scoregate-aggregator
+  mock-amm
+  mock-lending
 )
 
 echo "Checking contract-only builds for dead code with wasm-target lints enabled"

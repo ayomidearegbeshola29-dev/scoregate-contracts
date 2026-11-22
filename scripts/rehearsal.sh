@@ -74,50 +74,69 @@ run() {
   fi
 }
 
-# The expect_* helpers choose between a dry run and a live check before any assertion is made, so
-# a dry run never inspects the text that `run` prints.
+# ── Snapshot helpers ─────────────────────────────────────────────────────────
 
-# expect_success <pass message> <fail message> <command...>
-expect_success() {
-  local ok_msg="$1" bad_msg="$2"
-  shift 2
+# take_snapshot <file> <label>: call compute_state_checksum and keep the StateSnapshot it returns
+# as evidence, normalised to the shape `recovery reconcile` reads (hex roots, numeric counters).
+# A call that fails, or output that is not a well-formed snapshot, fails the rehearsal.
+take_snapshot() {
+  local file="$1" label="$2" output
   if [ "$DRY_RUN" = true ]; then
-    run "$@"
-    pass "$ok_msg"
-  elif "$@" 2>/dev/null; then
-    pass "$ok_msg"
+    echo "[dry-run] soroban contract invoke --id $CONTRACT_ID -- compute_state_checksum  > $file"
+    return 0
+  fi
+  if ! output=$(soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    compute_state_checksum \
+    --admin_signers '["'"$ADMIN_ADDRESS"'"]' 2>/dev/null); then
+    fail "$label snapshot: compute_state_checksum failed"
+    return 0
+  fi
+  if printf '%s' "$output" | jq -e '
+      select(all(.score_root, .config_root, .auth_root; type == "string" and test("^[0-9a-fA-F]{64}$")))
+      | {
+          score_root, config_root, auth_root,
+          entry_count: (.entry_count | tonumber),
+          ledger_seq: (.ledger_seq | tonumber),
+          timestamp: (.timestamp | tonumber)
+        }' > "$file" 2>/dev/null && [ -s "$file" ]; then
+    pass "$label snapshot saved: $file"
   else
-    fail "$bad_msg"
+    rm -f "$file"
+    fail "$label snapshot is not a well-formed StateSnapshot (compute_state_checksum returned: $output)"
   fi
 }
 
-# expect_failure <pass message> <fail message> <command...>: the command is expected to be rejected.
-expect_failure() {
-  local ok_msg="$1" bad_msg="$2"
-  shift 2
+# reconcile_snapshots: compare the two snapshots with the recovery tool and fail on any
+# difference, naming each root or counter that changed. Missing evidence fails too.
+reconcile_snapshots() {
   if [ "$DRY_RUN" = true ]; then
-    run "$@"
-    pass "$ok_msg"
-  elif "$@" 2>/dev/null; then
-    fail "$bad_msg"
-  else
-    pass "$ok_msg"
+    echo "[dry-run] cargo run -q -p recovery -- reconcile $SNAPSHOT_PRE $SNAPSHOT_POST -o $RECONCILIATION_REPORT"
+    return 0
   fi
-}
-
-# expect_output <pattern> <pass message> <fail message> <command...>: passes when the command's
-# output matches the pattern.
-expect_output() {
-  local pattern="$1" ok_msg="$2" bad_msg="$3"
-  shift 3
-  if [ "$DRY_RUN" = true ]; then
-    run "$@"
-    pass "$ok_msg"
-  elif "$@" 2>/dev/null | rg -q "$pattern"; then
-    pass "$ok_msg"
-  else
-    fail "$bad_msg"
+  if [ ! -s "$SNAPSHOT_PRE" ] || [ ! -s "$SNAPSHOT_POST" ]; then
+    fail "Cannot reconcile: snapshot evidence is missing ($SNAPSHOT_PRE, $SNAPSHOT_POST)"
+    return 0
   fi
+  if ! cargo run -q -p recovery -- reconcile "$SNAPSHOT_PRE" "$SNAPSHOT_POST" -o "$RECONCILIATION_REPORT" 2>/dev/null \
+    || [ ! -s "$RECONCILIATION_REPORT" ]; then
+    fail "recovery reconcile did not produce a report at $RECONCILIATION_REPORT"
+    return 0
+  fi
+  local entry label field
+  for entry in "score root:score_roots_match" "config root:config_roots_match" \
+    "auth root:auth_roots_match" "entry count:entry_counts_match"; do
+    label="${entry%%:*}"
+    field="${entry##*:}"
+    if jq -e ".${field} == true" "$RECONCILIATION_REPORT" >/dev/null 2>&1; then
+      pass "The $label is unchanged between the pre- and post-incident snapshots"
+    else
+      fail "The $label DIVERGED between the pre- and post-incident snapshots"
+    fi
+  done
 }
 
 # ── Step 0: Build contract ───────────────────────────────────────────────────
@@ -204,8 +223,8 @@ else
 fi
 pass "Query endpoints responsive"
 
-# Full snapshot requires compute_state_checksum which requires admin auth.
-# In rehearsal, we check that the function is exposed.
+take_snapshot "$SNAPSHOT_PRE" "Pre-incident"
+
 log "Checking compute_state_checksum is accessible..."
 expect_output "true" "checksum interface supported" "checksum interface NOT supported" \
   soroban contract invoke \
@@ -278,6 +297,14 @@ expect_output "false" "Contract is unfrozen" "Contract is still frozen" \
   -- \
   is_frozen
 
+# ── Step 6b: Post-incident snapshot and reconciliation ───────────────────────
+
+log "Taking post-incident state snapshot..."
+take_snapshot "$SNAPSHOT_POST" "Post-incident"
+
+log "Reconciling the pre- and post-incident snapshots..."
+reconcile_snapshots
+
 # ── Step 7: Verify export endpoints ──────────────────────────────────────────
 
 log "Checking export interfaces..."
@@ -346,6 +373,9 @@ else
 fi
 echo "  Contract: $CONTRACT_ID"
 echo "  Network:  $NETWORK"
+echo "  Snapshots:      $SNAPSHOT_PRE"
+echo "                  $SNAPSHOT_POST"
+echo "  Reconciliation: $RECONCILIATION_REPORT"
 echo "  ───────────────────────────────────────────────────────"
 echo ""
 

@@ -184,8 +184,9 @@ Use this checklist when progressing a symbol from **Deprecated** to **Removed**:
       compat test(s) from `test_deprecation_compat.rs`.
 - [ ] Move the CHANGELOG entry from `[Unreleased]` to the dated release
       section.
-- [ ] Update `docs/abi-compatibility-notes.md` with a new row in the breaking-
-      changes table.
+- [ ] Update the frozen ABI fixtures under `tests/fixtures/historical/` as described in
+      [`docs/historical-wasm-compatibility.md`](historical-wasm-compatibility.md), and
+      note the breaking change in `CHANGELOG.md`.
 
 ---
 
@@ -227,7 +228,7 @@ Sunset-Announced window. The only cost is the eventual migration effort.
   [`docs/interface-spec.md`](interface-spec.md)
 - Version numbering and breaking vs. non-breaking changes:
   [`docs/interface-versioning-policy.md`](interface-versioning-policy.md)
-- ABI snapshot and CI enforcement:
-  [`docs/abi-compatibility-notes.md`](abi-compatibility-notes.md)
+- ABI golden files and CI enforcement:
+  [`docs/historical-wasm-compatibility.md`](historical-wasm-compatibility.md)
 - Migration guides for past breaking changes:
   [`CHANGELOG.md`](../CHANGELOG.md)

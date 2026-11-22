@@ -156,3 +156,74 @@ fn pair_correlation_defaults_zero() {
         0
     );
 }
+
+// ── #287: covariance symmetry regardless of configuration order ─────────────
+
+#[test]
+fn var_symmetric_regardless_of_correlation_config_order() {
+    let s = setup();
+    let wallet = Address::generate(&s.env);
+    submit(&s.env, &s.client, &wallet, symbol_short!("XLM_USDC"), 60);
+    submit(&s.env, &s.client, &wallet, symbol_short!("XLM_BTC"), 80);
+
+    // Configure correlation in one direction only.
+    s.client
+        .set_pair_correlation(&symbol_short!("XLM_USDC"), &symbol_short!("XLM_BTC"), &8_000)
+        .unwrap();
+
+    let var_forward = s.client.get_portfolio_var(&wallet, &95).unwrap();
+
+    // Reverse-direction read must yield the same configured correlation.
+    assert_eq!(
+        s.client.get_pair_correlation(&symbol_short!("XLM_BTC"), &symbol_short!("XLM_USDC")),
+        8_000
+    );
+
+    // Re-configuring in the reverse order must not change the computed VaR.
+    s.client
+        .set_pair_correlation(&symbol_short!("XLM_BTC"), &symbol_short!("XLM_USDC"), &8_000)
+        .unwrap();
+    let var_reverse = s.client.get_portfolio_var(&wallet, &95).unwrap();
+
+    assert_eq!(
+        var_forward, var_reverse,
+        "VaR must be identical regardless of pair listing order: {var_forward} vs {var_reverse}"
+    );
+}
+
+#[test]
+fn var_three_pairs_symmetric_correlation() {
+    let s = setup();
+    let wallet = Address::generate(&s.env);
+    submit(&s.env, &s.client, &wallet, symbol_short!("XLM_USDC"), 60);
+    submit(&s.env, &s.client, &wallet, symbol_short!("XLM_BTC"), 65);
+    submit(&s.env, &s.client, &wallet, symbol_short!("XLM_ETH"), 70);
+
+    // Configure each pair in a single direction only.
+    s.client
+        .set_pair_correlation(&symbol_short!("XLM_USDC"), &symbol_short!("XLM_BTC"), &6_000)
+        .unwrap();
+    s.client
+        .set_pair_correlation(&symbol_short!("XLM_BTC"), &symbol_short!("XLM_ETH"), &4_000)
+        .unwrap();
+    s.client
+        .set_pair_correlation(&symbol_short!("XLM_USDC"), &symbol_short!("XLM_ETH"), &2_000)
+        .unwrap();
+
+    let var = s.client.get_portfolio_var(&wallet, &95).unwrap();
+    assert!(var > 0 && var <= 100, "VaR={var}");
+
+    // Every configured pair must read back symmetrically.
+    assert_eq!(
+        s.client.get_pair_correlation(&symbol_short!("XLM_BTC"), &symbol_short!("XLM_USDC")),
+        6_000
+    );
+    assert_eq!(
+        s.client.get_pair_correlation(&symbol_short!("XLM_ETH"), &symbol_short!("XLM_BTC")),
+        4_000
+    );
+    assert_eq!(
+        s.client.get_pair_correlation(&symbol_short!("XLM_ETH"), &symbol_short!("XLM_USDC")),
+        2_000
+    );
+}

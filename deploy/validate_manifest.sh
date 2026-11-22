@@ -13,10 +13,90 @@ readonly MANIFEST_MIN_UPGRADE_DELAY_SECS=172800
 readonly MANIFEST_MAX_UPGRADE_DELAY_SECS=1209600
 readonly MANIFEST_CONTRACT_SCHEMA_VERSION=4
 
-# Validates a Stellar StrKey public key (e.g. a service address): 56
-# characters, starting with 'G', using base32 alphabet [A-Z2-7].
+# StrKey version byte for a Stellar account (ed25519 public key).
+readonly MANIFEST_STRKEY_ACCOUNT_VERSION=48
+
+# Decodes a base32 (RFC 4648, no padding) string into a space-separated list
+# of byte values on stdout. Returns 1 on any invalid character.
+manifest_base32_decode() {
+  local input="$1" alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+  local -a out=()
+  local buffer=0 bits=0 i char idx
+  for ((i = 0; i < ${#input}; i++)); do
+    char="${input:i:1}"
+    idx=$(expr index "$alphabet" "$char")
+    if [ "$idx" -eq 0 ]; then
+      return 1
+    fi
+    buffer=$(((buffer << 5) | (idx - 1)))
+    bits=$((bits + 5))
+    if [ "$bits" -ge 8 ]; then
+      bits=$((bits - 8))
+      out+=("$(((buffer >> bits) & 0xFF))")
+    fi
+  done
+  echo "${out[*]}"
+}
+
+# Computes the CRC16-XModem checksum over the given byte values on stdout.
+manifest_crc16_xmodem() {
+  local crc=0 byte i
+  for byte in "$@"; do
+    crc=$((crc ^ (byte << 8)))
+    for ((i = 0; i < 8; i++)); do
+      if [ $((crc & 0x8000)) -ne 0 ]; then
+        crc=$(((crc << 1) ^ 0x1021))
+      else
+        crc=$((crc << 1))
+      fi
+      crc=$((crc & 0xFFFF))
+    done
+  done
+  echo "$crc"
+}
+
+# Validates a Stellar StrKey account public key (e.g. a service address):
+# 56 characters, starting with 'G', using base32 alphabet [A-Z2-7], with a
+# valid account version byte and CRC16-XModem checksum. Prints a diagnostic
+# to stderr and returns 1 on failure; returns 0 on success.
 manifest_is_valid_stellar_address() {
-  [[ "$1" =~ ^G[A-Z2-7]{55}$ ]]
+  local address="$1"
+  if ! [[ "$address" =~ ^G[A-Z2-7]{55}$ ]]; then
+    echo "ERROR: '$address' is not a valid Stellar public key" \
+      "(expected 'G' followed by 55 base32 characters)." >&2
+    return 1
+  fi
+
+  local decoded
+  if ! decoded=$(manifest_base32_decode "$address"); then
+    echo "ERROR: '$address' contains characters outside the base32 alphabet." >&2
+    return 1
+  fi
+
+  local -a bytes
+  read -r -a bytes <<<"$decoded"
+  if [ "${#bytes[@]}" -ne 35 ]; then
+    echo "ERROR: '$address' does not decode to a 35-byte StrKey payload." >&2
+    return 1
+  fi
+
+  if [ "${bytes[0]}" -ne "$MANIFEST_STRKEY_ACCOUNT_VERSION" ]; then
+    echo "ERROR: '$address' is not a Stellar account address" \
+      "(unsupported StrKey version byte ${bytes[0]}; only account keys are supported)." >&2
+    return 1
+  fi
+
+  local payload=("${bytes[@]:0:33}")
+  local expected actual
+  expected=$(manifest_crc16_xmodem "${payload[@]}")
+  actual=$((bytes[33] | (bytes[34] << 8)))
+  if [ "$expected" -ne "$actual" ]; then
+    echo "ERROR: '$address' has an invalid StrKey checksum" \
+      "(expected $(printf '0x%04X' "$expected"), got $(printf '0x%04X' "$actual"))." >&2
+    return 1
+  fi
+
+  return 0
 }
 
 manifest_is_valid_rpc_url() {
@@ -81,7 +161,7 @@ validate_manifest() {
 
   if [ "$schema" != "$MANIFEST_CONTRACT_SCHEMA_VERSION" ]; then
     echo "ERROR: manifest[$network].schema_version=$schema does not match the" \
-      "compiled contract schema version ($MANIFEST_CONTRACT_SCHEMA_VERSION)." \
+      " compiled contract schema version ($MANIFEST_CONTRACT_SCHEMA_VERSION)." \
       "Update the manifest or rebuild against the expected contract version." >&2
     errors=$((errors + 1))
   fi
@@ -108,8 +188,6 @@ validate_manifest() {
   fi
 
   if ! manifest_is_valid_stellar_address "$service_address"; then
-    echo "ERROR: service-address '$service_address' is not a valid Stellar public key" \
-      "(expected 'G' followed by 55 base32 characters)." >&2
     errors=$((errors + 1))
   fi
 

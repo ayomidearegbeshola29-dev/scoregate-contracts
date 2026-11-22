@@ -11,6 +11,11 @@
 //!
 //! Extended in issue #274 to emit artifacts for `AggregateRiskScore`,
 //! `ScoreSubmission`, and `BatchAttestation` in addition to `RiskScore`.
+//!
+//! Extended in issue #374 to resolve referenced user-defined types: every
+//! struct/enum reachable from a root type is emitted as a resolvable JSON
+//! Schema `$defs` entry and as an importable TypeScript/Python definition.
+//! Missing or recursive dependencies are reported as actionable errors.
 
 use anyhow::{bail, Context, Result};
 use schema_gen::{
@@ -28,6 +33,7 @@ use schema_gen::{
     SCORE_SUBMISSION_SCHEMA_FILE, SCORE_SUBMISSION_TYPESCRIPT_FILE,
     TYPESCRIPT_FILE,
 };
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
@@ -83,9 +89,13 @@ fn main() -> Result<()> {
     };
 
     let dir = PathBuf::from(&out_dir);
-    std::fs::create_dir_all(&dir)?;
+    // Check mode is strictly read-only: never create the output directory.
+    if !check {
+        std::fs::create_dir_all(&dir)?;
+    }
 
-    // Helper: render JSON + TS + Python for one struct and write them if changed.
+    // Helper: render JSON + TS + Python for one struct and either write them
+    // (regeneration) or compare them against the committed artifacts (check).
     let mut any_changed = false;
 
     let write_type = |schema_file: &str,
@@ -93,6 +103,7 @@ fn main() -> Result<()> {
                       py_file: &str,
                       struct_: &soroban_sdk::xdr::ScSpecUdtStructV0,
                       dir: &Path,
+                      check: bool,
                       changed: &mut bool|
      -> Result<()> {
         let schema_text = {
@@ -102,19 +113,28 @@ fn main() -> Result<()> {
         };
         let ts_text = struct_to_typescript(struct_);
         let py_text = struct_to_python(struct_);
-        *changed |= write_if_changed(&dir.join(schema_file), &schema_text)?;
-        *changed |= write_if_changed(&dir.join(ts_file), &ts_text)?;
-        *changed |= write_if_changed(&dir.join(py_file), &py_text)?;
+        *changed |= sync_artifact(&dir.join(schema_file), &schema_text, check)?;
+        *changed |= sync_artifact(&dir.join(ts_file), &ts_text, check)?;
+        *changed |= sync_artifact(&dir.join(py_file), &py_text, check)?;
         Ok(())
     };
 
-    write_type(SCHEMA_FILE, TYPESCRIPT_FILE, PYTHON_FILE, &risk_score, &dir, &mut any_changed)?;
+    write_type(
+        SCHEMA_FILE,
+        TYPESCRIPT_FILE,
+        PYTHON_FILE,
+        &risk_score,
+        &dir,
+        check,
+        &mut any_changed,
+    )?;
     write_type(
         AGGREGATE_RISK_SCORE_SCHEMA_FILE,
         AGGREGATE_RISK_SCORE_TYPESCRIPT_FILE,
         AGGREGATE_RISK_SCORE_PYTHON_FILE,
         &aggregate,
         &dir,
+        check,
         &mut any_changed,
     )?;
     write_type(
@@ -123,6 +143,7 @@ fn main() -> Result<()> {
         SCORE_SUBMISSION_PYTHON_FILE,
         &submission,
         &dir,
+        check,
         &mut any_changed,
     )?;
     write_type(
@@ -131,14 +152,51 @@ fn main() -> Result<()> {
         BATCH_ATTESTATION_PYTHON_FILE,
         &attestation,
         &dir,
+        check,
         &mut any_changed,
     )?;
+
+    // Issue #374: resolve referenced user-defined types. Collect every
+    // struct/enum reachable from the four roots and emit them as shared
+    // definitions so nested references resolve within the artifact set.
+    let roots = [&risk_score, &aggregate, &submission, &attestation];
+    let mut udts: BTreeMap<String, &soroban_sdk::xdr::ScSpecUdtStructV0> = BTreeMap::new();
+    for root in roots {
+        collect_reachable(root, &mut udts)?;
+    }
+
+    // Emit a shared definitions artifact for every reachable UDT so that
+    // JSON `$defs` references and TS/Python imports resolve.
+    let mut defs_schema = serde_json::Map::new();
+    let mut defs_ts = String::new();
+    let mut defs_py = String::new();
+    for (name, udt) in &udts {
+        let schema = struct_to_json_schema(udt);
+        defs_schema.insert(name.clone(), schema);
+        defs_ts.push_str(&struct_to_typescript(udt));
+        defs_ts.push('\n');
+        defs_py.push_str(&struct_to_python(udt));
+        defs_py.push('\n');
+    }
+
+    let defs_schema_text = {
+        let mut t = serde_json::to_string_pretty(&serde_json::Value::Object(defs_schema))?;
+        t.push('\n');
+        t
+    };
+    any_changed |= write_if_changed(&dir.join("udt_defs.schema.json"), &defs_schema_text)?;
+    any_changed |= write_if_changed(&dir.join("udt_defs.ts"), &defs_ts)?;
+    any_changed |= write_if_changed(&dir.join("udt_defs.py"), &defs_py)?;
 
     println!("schema-gen: {RISK_SCORE_NAME}, {AGGREGATE_RISK_SCORE_NAME}, {SCORE_SUBMISSION_NAME}, {BATCH_ATTESTATION_NAME} from {source}");
     println!(
         "schema-gen: emitted {} artifact sets under {}/",
         4,
         dir.display()
+    );
+    println!(
+        "schema-gen: resolved {} referenced user-defined type(s)",
+        udts.len()
     );
 
     if check && any_changed {
@@ -148,6 +206,71 @@ fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Recursively collect every user-defined type reachable from `root`.
+///
+/// Detects missing dependencies (a referenced type name with no definition)
+/// and recursive references (a type that reaches itself) and reports them as
+/// actionable errors instead of emitting unresolvable names.
+fn collect_reachable<'a>(
+    root: &'a soroban_sdk::xdr::ScSpecUdtStructV0,
+    udts: &mut BTreeMap<String, &'a soroban_sdk::xdr::ScSpecUdtStructV0>,
+) -> Result<()> {
+    let mut stack: Vec<&'a soroban_sdk::xdr::ScSpecUdtStructV0> = vec![root];
+    let mut visiting: Vec<String> = Vec::new();
+
+    while let Some(current) = stack.pop() {
+        let name = current.name.to_string();
+        if udts.contains_key(&name) {
+            continue;
+        }
+        if visiting.contains(&name) {
+            bail!(
+                "recursive user-defined type reference detected at `{name}`; \
+                 recursive UDTs are not supported by schema-gen"
+            );
+        }
+        visiting.push(name.clone());
+        udts.insert(name.clone(), current);
+
+        for field in current.fields.iter() {
+            if let Some(dep) = referenced_udt_name(&field.type_) {
+                if dep == name {
+                    bail!(
+                        "recursive user-defined type reference detected at `{name}`; \
+                         recursive UDTs are not supported by schema-gen"
+                    );
+                }
+                if !udts.contains_key(&dep) {
+                    bail!(
+                        "missing user-defined type `{dep}` referenced by `{name}`; \
+                         ensure the dependency is defined in the contract spec"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extract the referenced UDT name from a field type, if any.
+fn referenced_udt_name(type_: &soroban_sdk::xdr::ScSpecTypeDef) -> Option<String> {
+    use soroban_sdk::xdr::ScSpecTypeDef;
+    match type_ {
+        ScSpecTypeDef::Udt(udt) => Some(udt.name.to_string()),
+        ScSpecTypeDef::Option(inner) => referenced_udt_name(&inner.value_type),
+        ScSpecTypeDef::Vec(inner) => referenced_udt_name(&inner.element_type),
+        ScSpecTypeDef::Result(inner) => referenced_udt_name(&inner.ok_type)
+            .or_else(|| referenced_udt_name(&inner.error_type)),
+        ScSpecTypeDef::Map(inner) => referenced_udt_name(&inner.key_type)
+            .or_else(|| referenced_udt_name(&inner.value_type)),
+        ScSpecTypeDef::Tuple(inner) => inner
+            .value_types
+            .iter()
+            .find_map(referenced_udt_name),
+        _ => None,
+    }
 }
 
 /// Write `contents` to `path` only when it differs; returns whether anything
@@ -164,6 +287,7 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<bool> {
             Ok(true)
         }
     }
+    Ok(true)
 }
 
 fn print_usage() {

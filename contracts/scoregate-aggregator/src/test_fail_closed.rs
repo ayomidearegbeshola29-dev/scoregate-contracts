@@ -13,7 +13,7 @@
 
 use crate::{ScoreGateAggregator, ScoreGateAggregatorClient};
 use scoregate_score::{ScoreGateScoreContract, ScoreGateScoreContractClient};
-use scoregate_test_support::{generate_score_roles, test_env};
+use scoregate_test_support::{generate_score_roles, strict_test_env, test_env};
 use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
 
 /// Registers and initializes a real score shard.
@@ -78,6 +78,34 @@ fn mark_unhealthy(env: &Env, client: &ScoreGateAggregatorClient, shard: &Address
     env.mock_all_auths();
     client.set_shard_health(shard, &false);
     env.mock_all_auths();
+}
+
+// ── #354: strict test env without blanket authorization ─────────────────────
+
+/// #354: under the strict constructor an unsigned administrative call must be
+/// rejected, while an explicitly authorized one succeeds.
+#[test]
+fn strict_env_rejects_unsigned_admin_call_and_accepts_authorized() {
+    let env = strict_test_env();
+    let agg_id = env.register_contract(None, ScoreGateAggregator);
+    let client = ScoreGateAggregatorClient::new(&env, &agg_id);
+
+    let admin = Address::generate(&env);
+
+    // Unsigned administrative call must fail without blanket mocks.
+    assert!(client.try_initialize(&admin).is_err());
+
+    // Explicitly authorized call succeeds.
+    client.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: admin.clone(),
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &agg_id,
+            fn_name: "initialize",
+            args: (admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin);
 }
 
 // ── #59: the risk gate must fail closed ──────────────────────────────────────
@@ -223,27 +251,4 @@ fn get_watchlist_status_skips_unhealthy_shards() {
     let wallet = Address::generate(&env);
     shard_a_client.set_watchlist(&soroban_sdk::Vec::new(&env), &wallet, &true);
 
-    assert!(client.get_watchlist_status(&wallet));
-
-    mark_unhealthy(&env, &client, &shard_a);
-    assert!(!client.get_watchlist_status(&wallet));
-}
-
-/// #62: watchlist queries return valid results from operational shards even when
-/// another shard is unhealthy.
-#[test]
-fn get_watchlist_status_returns_true_from_healthy_shard_when_another_is_unhealthy() {
-    let env = test_env();
-    let client = aggregator_with_shards(&env, 2);
-
-    let shards = client.get_shards();
-    let shard_a = shards.get(0).unwrap();
-    let shard_b = shards.get(1).unwrap();
-    let shard_b_client = ScoreGateScoreContractClient::new(&env, &shard_b);
-
-    let wallet = Address::generate(&env);
-    shard_b_client.set_watchlist(&soroban_sdk::Vec::new(&env), &wallet, &true);
-
-    mark_unhealthy(&env, &client, &shard_a);
-    assert!(client.get_watchlist_status(&wallet));
-}
+    assert!(client

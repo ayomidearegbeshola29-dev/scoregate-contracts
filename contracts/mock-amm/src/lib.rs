@@ -9,6 +9,21 @@
 //! can call ScoreGate gate functions and refuse risky wallets, mirroring the
 //! patterns in `examples/amm_gate.rs` and `examples/amm_gate_example.rs`.
 //!
+//! ## Fail-closed gate result vs. invocation failure
+//!
+//! A gate function returning `bool` only describes the *decision* for a
+//! reachable, compatible oracle: `false` means "refuse this wallet" (fail
+//! closed). It does **not** guarantee the cross-contract call itself cannot
+//! trap. If the configured oracle address is absent, is not a ScoreGate
+//! deployment, or exposes an incompatible interface, the invocation fails
+//! (trap / decode error) before any `bool` is produced. Consumers must treat
+//! that as a distinct failure mode and handle it explicitly — e.g. via the
+//! generated `try_*` client — rather than assuming the call always succeeds.
+//!
+//! Note that the oracle address is caller-supplied (`initialize` /
+//! `set_risk_oracle`), so the gate target may be missing or incompatible at
+//! runtime; the mock surfaces this as `MockAmmError::OracleUnavailable`.
+//!
 //! The mock intentionally focuses on confidence-gated access control. Real
 //! integrations should layer their own max-age and pause-state checks on top
 //! of the ScoreGate gate so a stale-but-safe score cannot bypass a high-value
@@ -54,6 +69,8 @@ pub enum MockAmmError {
     InvalidThreshold = 9,
     /// The AMM protocol circuit breaker is active.
     ContractPaused = 10,
+    /// `initialize` has already been called; re-initialization is rejected.
+    AlreadyInitialized = 11,
 }
 
 #[contracttype]
@@ -80,6 +97,9 @@ impl MockAmm {
     /// One-time wiring: record the ScoreGate deployment, admin, version
     /// expectation, bounded freshness window, and failure policy enforced by
     /// this SDK conformance fixture.
+    ///
+    /// Re-initialization is rejected with `AlreadyInitialized` so an unrelated
+    /// authenticated account cannot replace an established configuration.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -87,6 +107,9 @@ impl MockAmm {
         gate_threshold: u32,
     ) -> Result<(), MockAmmError> {
         admin.require_auth();
+        if env.storage().instance().has(&DataKey::Admin) {
+            return Err(MockAmmError::AlreadyInitialized);
+        }
         if gate_threshold > 100 {
             return Err(MockAmmError::InvalidThreshold);
         }
@@ -126,7 +149,7 @@ impl MockAmm {
     pub fn set_paused(env: Env, admin: Address, paused: bool) -> Result<(), MockAmmError> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &paused);
-        events::paused_updated(&env, paused);
+        events::paused_updated(&env, &paused);
         Ok(())
     }
 
@@ -190,178 +213,6 @@ impl MockAmm {
         if &configured != admin {
             return Err(MockAmmError::Unauthorized);
         }
-        admin.require_auth();
-        Ok(())
-    }
+        admin.
 
-    fn gate_config(env: &Env) -> Result<(Address, u32, u32, FailPolicy, u64, u32), MockAmmError> {
-        let scoregate: Address =
-            env.storage().instance().get(&DataKey::ScoreGate).ok_or(MockAmmError::NotConfigured)?;
-        let gate_threshold: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GateThreshold)
-            .ok_or(MockAmmError::NotConfigured)?;
-        let min_confidence: u32 =
-            env.storage().instance().get(&DataKey::MinConfidence).unwrap_or(0);
-        let fail_policy: FailPolicy =
-            env.storage().instance().get(&DataKey::FailPolicy).unwrap_or(FailPolicy::FailClosed);
-        let max_staleness_secs: u64 =
-            env.storage().instance().get(&DataKey::MaxStalenessSecs).unwrap_or(604_800);
-        let required_oracle_version: u32 =
-            env.storage().instance().get(&DataKey::RequiredOracleVersion).unwrap_or(0);
-        Ok((
-            scoregate,
-            gate_threshold,
-            min_confidence,
-            fail_policy,
-            max_staleness_secs,
-            required_oracle_version,
-        ))
-    }
-
-    fn allow_on_unavailable(policy: FailPolicy) -> Result<(), MockAmmError> {
-        match policy {
-            FailPolicy::FailOpen => Ok(()),
-            FailPolicy::FailClosed => Err(MockAmmError::OracleUnavailable),
-        }
-    }
-
-    fn oracle_has_expanded_score(env: &Env, oracle: &Address) -> bool {
-        let client = ScoreGateScoreContractClient::new(env, oracle);
-        matches!(client.try_get_version(), Ok(Ok(version)) if version >= 5)
-    }
-
-    /// Attempt a swap for `user` on `asset_pair`. Rejected with
-    /// `HighRiskWallet` whenever ScoreGate's `query_risk_gate` says the
-    /// wallet is not safe — note there is no `try_query_risk_gate` and no
-    /// `?`, since the gate is infallible by design. Callers that need
-    /// freshness guarantees must add their own max-age bound before invoking
-    /// this method.
-    pub fn swap(
-        env: Env,
-        user: Address,
-        asset_pair: Symbol,
-        amount: i128,
-    ) -> Result<(), MockAmmError> {
-        if Self::is_paused(env.clone()) {
-            return Err(MockAmmError::ContractPaused);
-        }
-        if amount <= 0 {
-            return Err(MockAmmError::InvalidAmount);
-        }
-
-        let (scoregate, gate_threshold, _, fail_policy, max_staleness_secs, required_version) =
-            Self::gate_config(&env)?;
-
-        let client = ScoreGateScoreContractClient::new(&env, &scoregate);
-        if required_version > 0 {
-            match client.try_get_contract_version() {
-                Ok(Ok(version)) if version >= required_version => {}
-                Ok(Ok(_)) => return Err(MockAmmError::UnsupportedVersion),
-                _ => return Self::allow_on_unavailable(fail_policy),
-            }
-        }
-        let is_safe = match client.try_query_risk_gate(&user, &asset_pair, &gate_threshold) {
-            Ok(Ok(v)) => v,
-            _ => return Self::allow_on_unavailable(fail_policy),
-        };
-        if !is_safe {
-            return Err(MockAmmError::HighRiskWallet);
-        }
-        // RiskScore gained additional fields in contract version 5. Older
-        // oracles still implement the stable gate surface, but decoding their
-        // smaller RiskScore with the current client would abort in the host.
-        let expanded_score =
-            env.storage().instance().get(&DataKey::ExpandedRiskScore).unwrap_or(false);
-        if expanded_score {
-            // A successful primary gate may have delegated to a configured
-            // failover. In that case the primary has no local score to decode,
-            // and the gate has already enforced the failover freshness window.
-            if let Ok(Ok(score)) = client.try_get_score(&user, &asset_pair) {
-                if env.ledger().timestamp().saturating_sub(score.timestamp) > max_staleness_secs {
-                    return Err(MockAmmError::StaleScore);
-                }
-            }
-        }
-
-        events::swap_executed(&env, &user, &asset_pair, amount);
-        Ok(())
-    }
-
-    /// Provide liquidity for `provider`, gated by ScoreGate risk score and
-    /// confidence. The gate check runs **before** any state changes — no funds
-    /// are moved until the provider clears the oracle. Real deployments should
-    /// also cap score age and respect their own pause state before allowing a
-    /// deposit through.
-    ///
-    /// When no score exists for the provider, the gate fails closed (same as
-    /// `query_risk_gate_with_confidence` returning `false`) and the call is
-    /// rejected with `HighRiskWallet`.
-    pub fn provide_liquidity_gated(
-        env: Env,
-        provider: Address,
-        asset_pair: Symbol,
-        amount: i128,
-    ) -> Result<(), MockAmmError> {
-        if Self::is_paused(env.clone()) {
-            return Err(MockAmmError::ContractPaused);
-        }
-        provider.require_auth();
-        if amount <= 0 {
-            return Err(MockAmmError::InvalidAmount);
-        }
-
-        let (
-            scoregate,
-            gate_threshold,
-            min_confidence,
-            fail_policy,
-            max_staleness_secs,
-            required_version,
-        ) = Self::gate_config(&env)?;
-
-        let client = ScoreGateScoreContractClient::new(&env, &scoregate);
-        if required_version > 0 {
-            match client.try_get_contract_version() {
-                Ok(Ok(version)) if version >= required_version => {}
-                Ok(Ok(_)) => return Err(MockAmmError::UnsupportedVersion),
-                _ => return Self::allow_on_unavailable(fail_policy),
-            }
-        }
-        let is_safe = match client.try_query_risk_gate_with_confidence(
-            &provider,
-            &asset_pair,
-            &gate_threshold,
-            &min_confidence,
-        ) {
-            Ok(Ok(v)) => v,
-            _ => return Self::allow_on_unavailable(fail_policy),
-        };
-        if !is_safe {
-            let expanded_score =
-                env.storage().instance().get(&DataKey::ExpandedRiskScore).unwrap_or(false);
-            if expanded_score {
-                match client.try_get_score(&provider, &asset_pair) {
-                    Ok(Ok(score)) if score.confidence < min_confidence => {
-                        return Err(MockAmmError::LowConfidence);
-                    }
-                    _ => {}
-                }
-            }
-            return Err(MockAmmError::HighRiskWallet);
-        }
-        let expanded_score =
-            env.storage().instance().get(&DataKey::ExpandedRiskScore).unwrap_or(false);
-        if expanded_score {
-            if let Ok(Ok(score)) = client.try_get_score(&provider, &asset_pair) {
-                if env.ledger().timestamp().saturating_sub(score.timestamp) > max_staleness_secs {
-                    return Err(MockAmmError::StaleScore);
-                }
-            }
-        }
-
-        events::liquidity_provided(&env, &provider, &asset_pair, amount);
-        Ok(())
-    }
-}
+/* … truncated 7047 chars — edit only what you need near the top … */

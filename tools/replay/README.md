@@ -62,6 +62,32 @@ fields, unknown observed fields, missing observed fields, and value drift are
 reported separately so operators can distinguish manifest mistakes from
 unauthorized on-chain changes.
 
+## Traceability Report
+
+`tools/replay/traceability_report.py` produces a **mapping-only** traceability
+report. It links requirement IDs to the test IDs you supply; it does **not**
+run tests and does **not** ingest test results. Consequently the report never
+claims that a test was executed or passed — it only records that a test ID is
+*referenced* by a requirement.
+
+Because the tool cannot verify that a referenced test ID actually exists, a
+nonexistent test ID is still reported as a reference (not as a successful
+execution). Treat the output as a coverage map, not as evidence of passing
+tests.
+
+### Coverage metric
+
+`coverage` is the fraction of requirements that reference at least one test ID:
+
+```
+coverage = requirements_with_at_least_one_reference / total_requirements
+```
+
+It measures how much of the requirement set is *linked* to tests. It says
+nothing about whether those tests exist, run, or pass. Both the JSON and the
+human-readable output use the same referenced/linked terminology so they
+describe the same evidence level.
+
 ## Testing
 
 Integration tests verify replay logic and contract call safety:

@@ -105,6 +105,11 @@ impl Error {
     /// Returned when an invalid target percentile is provided (must be 50-99).
     pub const InvalidPercentile: Error = Error::InvalidThreshold;
 
+    /// Returned by `set_pair_correlation` when the coefficient is outside
+    /// `[MIN_PAIR_CORRELATION, MAX_PAIR_CORRELATION]`. Reused discriminant: the enum is already at
+    /// the 50-variant XDR limit.
+    pub const InvalidCorrelation: Error = Error::InvalidThreshold;
+
     pub const ParameterProposalNotFound: Error = Error::ScoreNotFound;
     pub const ParameterProposalNotReady: Error = Error::UpgradeNotReady;
     pub const ParameterProposalVetoPeriodEnded: Error = Error::QuorumFailureWindowNotElapsed;
@@ -122,6 +127,15 @@ impl Error {
     pub const GateCallerListFull: Error = Error::ServiceSetFull;
     pub const GateCallerNotInList: Error = Error::ScoreNotFound;
     pub const ParamChangeAlreadyPending: Error = Error::UpgradeAlreadyPending;
+
+    // ── Anti-flash-loan protection (issue #290) ─────────────────────────────
+    /// Returned when `FlashProtectionMode::Reject` is active and a submit is
+    /// detected in the same ledger as a gate read for the same wallet/pair.
+    /// This signals flash-loan sandwiching / same-ledger reentrancy, and is
+    /// deliberately distinct from `EpochClosed` so clients and indexers do
+    /// not misattribute the rejection to epoch lifecycle. Reused
+    /// discriminant: the enum is already at the 50-variant XDR limit.
+    pub const FlashLoanDetected: Error = Error::RateLimitExceeded;
 
     // ── Memory-exhaustion guards (#612) ─────────────────────────────────────
     /// Returned by `submit_scores_batch_attested` when `signers.len()`
@@ -159,5 +173,5 @@ impl Error {
     // ── Contagion propagation bounds (Issue #55) ────────────────────────────
     /// Returned by `propagate_contagion` when `boost` exceeds
     /// `constants::MAX_CONTAGION_BOOST`.
-    pub const InvalidBoost: Error = Error::InvalidScore;
+    pub const InvalidContagionBoost: Error = Error::InvalidThreshold;
 }

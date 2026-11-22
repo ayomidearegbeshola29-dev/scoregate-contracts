@@ -5,10 +5,25 @@
 //! pattern from `docs/interface-spec.md`: call [`query_risk_gate`] inside your
 //! guard clause and refuse to proceed for risky wallets.
 //!
-//! The key property exercised here is that `query_risk_gate` is **infallible**
-//! and **side-effect free**. The AMM can call it from inside `swap` without a
-//! `try_*` wrapper, without worrying about error propagation, and without any
-//! risk that ScoreGate could panic and burn the AMM's gas or brick its guard.
+//! ## Fail-closed result vs. invocation failure
+//!
+//! `query_risk_gate` is **side-effect free** and returns a `bool`. A `false`
+//! result is a *fail-closed gate decision*: ScoreGate ran successfully and
+//! determined the wallet should be refused (unknown wallet, low confidence, or
+//! score at/above the threshold). That is a normal, expected outcome.
+//!
+//! A `bool` return type does **not** mean the call cannot trap. Invoking a
+//! contract that is absent, has been upgraded to an incompatible interface, or
+//! otherwise errors will fail the invocation itself — the host raises an error
+//! and, without a `try_*` wrapper, that error propagates and aborts the caller.
+//! The gate target is caller-supplied (see [`ScoreGateGatedAmm::initialize`]),
+//! so it may point at a missing or incompatible contract. Integrators must not
+//! assume the call is infallible.
+//!
+//! The `swap` implementation below therefore uses the generated try client
+//! (`try_query_risk_gate`) and maps invocation failure onto its own documented
+//! error path ([`AmmError::GateUnavailable`]) rather than letting it trap.
+//!
 //! A consumer can also discover the published capability surface via
 //! `get_interface_metadata` and use the `fail_closed` constraint to reason
 //! about how unknown wallets and low-confidence scores should be handled.
@@ -41,6 +56,9 @@ pub enum AmmError {
     HighRiskWallet = 2,
     /// Swap amount must be positive.
     InvalidAmount = 3,
+    /// The ScoreGate call itself failed (absent or incompatible contract).
+    /// This is an invocation failure, distinct from a fail-closed `false`.
+    GateUnavailable = 4,
 }
 
 #[contracttype]
@@ -60,6 +78,8 @@ pub struct ScoreGateGatedAmm;
 impl ScoreGateGatedAmm {
     /// One-time wiring: record which ScoreGate deployment to consult.
     ///
+    /// The address is caller-supplied, so it may be absent or point at an
+    /// incompatible contract; `swap` handles that via `GateUnavailable`.
     /// A production AMM would protect this behind admin auth; omitted here to
     /// keep the example focused on the gating pattern.
     pub fn initialize(env: Env, scoregate: Address) {
@@ -69,9 +89,10 @@ impl ScoreGateGatedAmm {
     /// Process a swap, but only after clearing the swapper through ScoreGate.
     ///
     /// This is the pattern integrators should copy: build the generated client
-    /// for the ScoreGate contract, ask `query_risk_gate`, and bail out with
-    /// your own domain error if the wallet is not safe. Note there is no
-    /// `try_query_risk_gate` and no `?` — the gate cannot fail.
+    /// for the ScoreGate contract, ask `query_risk_gate` via the try client,
+    /// and map both outcomes onto explicit domain errors. A `false` gate result
+    /// becomes `HighRiskWallet`; an invocation failure (absent or incompatible
+    /// dependency) becomes `GateUnavailable`. Neither traps the AMM.
     pub fn swap(env: Env, user: Address, amount: i128) -> Result<(), AmmError> {
         if amount <= 0 {
             return Err(AmmError::InvalidAmount);
@@ -82,7 +103,11 @@ impl ScoreGateGatedAmm {
 
         let client = ScoreGateScoreContractClient::new(&env, &llens_contract);
 
-        let is_safe = client.query_risk_gate(&user, &symbol_short!("XLM_USDC"), &GATE_THRESHOLD);
+        // Explicit consumer policy: treat invocation failure as unavailable.
+        let is_safe = client
+            .try_query_risk_gate(&user, &symbol_short!("XLM_USDC"), &GATE_THRESHOLD)
+            .map_err(|_| AmmError::GateUnavailable)?
+            .map_err(|_| AmmError::GateUnavailable)?;
         if !is_safe {
             return Err(AmmError::HighRiskWallet);
         }

@@ -135,7 +135,7 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 declare -A PIPELINE_KEYS   # key="wallet|pair" -> 1
-while IFS= read -r line; do
+while IFS= read -r line || [[ -n "$line" ]]; do
   [[ -z "$line" ]] && continue
   wallet=$(echo "$line" | jq -r '.wallet // empty')
   pair=$(echo "$line"   | jq -r '.asset_pair // empty')
@@ -150,7 +150,7 @@ ENTRIES_JSON="[]"
 OK=0; MISMATCH=0; ONCHAIN_ONLY=0; PIPELINE_ONLY=0; STALE=0
 
 # Process every pipeline entry.
-while IFS= read -r line; do
+while IFS= read -r line || [[ -n "$line" ]]; do
   [[ -z "$line" ]] && continue
   p_wallet=$(echo "$line"     | jq -r '.wallet // empty')
   p_pair=$(echo "$line"       | jq -r '.asset_pair // empty')

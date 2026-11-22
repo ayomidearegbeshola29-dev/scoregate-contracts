@@ -6,12 +6,33 @@
 use crate::{Error, ScoreGateAggregator, ScoreGateAggregatorClient};
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
+/// Builds a configured test environment with blanket-mocked authorization.
+///
+/// This is the positive-path fixture: every `require_auth` call succeeds
+/// without an explicit signature. Use [`setup_strict`] when the test needs to
+/// observe authorization failures.
 fn setup<'a>() -> (Env, ScoreGateAggregatorClient<'a>, Address) {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, ScoreGateAggregator);
     let client = ScoreGateAggregatorClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
+    client.initialize(&admin).expect("initialize failed");
+    (env, client, admin)
+}
+
+/// Builds a configured test environment with normal (strict) authorization.
+///
+/// No blanket mocks are installed, so privileged calls require an explicit
+/// authorization entry. `initialize` is invoked with the admin's auth mocked
+/// only for that single call so the fixture can be set up; subsequent calls
+/// must authorize themselves.
+fn setup_strict<'a>() -> (Env, ScoreGateAggregatorClient<'a>, Address) {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ScoreGateAggregator);
+    let client = ScoreGateAggregatorClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_auths(&[]);
     client.initialize(&admin).expect("initialize failed");
     (env, client, admin)
 }
@@ -101,4 +122,42 @@ fn test_previous_admin_is_replaced_after_accept() {
     let current = client.get_admin().unwrap();
     assert_eq!(current, new_admin, "admin should be updated to new_admin after accept");
     assert_ne!(current, old_admin, "old_admin must no longer be the admin");
+}
+
+// ── Strict authorization regression coverage ──────────────────────────────────
+
+/// Under the strict constructor (no blanket mocks) an unsigned administrative
+/// call must be rejected by the host's authorization check.
+#[test]
+fn test_strict_env_rejects_unsigned_admin_call() {
+    let (env, client, _admin) = setup_strict();
+    let new_admin = Address::generate(&env);
+
+    // No auth entry is provided for the admin, so the host must reject the
+    // privileged call before it can mutate state.
+    let result = client.try_propose_admin(&new_admin);
+    assert!(result.is_err(), "unsigned propose_admin must fail under strict auth");
+    assert_eq!(client.get_pending_admin().unwrap(), None);
+}
+
+/// Under the strict constructor an explicitly authorized administrative call
+/// succeeds and mutates state as expected.
+#[test]
+fn test_strict_env_allows_explicitly_authorized_admin_call() {
+    let (env, client, admin) = setup_strict();
+    let new_admin = Address::generate(&env);
+
+    // Authorize only the admin for this call.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: admin.clone(),
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "propose_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.propose_admin(&new_admin).expect("authorized propose_admin failed");
+    assert_eq!(client.get_pending_admin().unwrap(), Some(new_admin));
 }

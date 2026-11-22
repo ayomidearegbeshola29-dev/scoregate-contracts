@@ -16,7 +16,23 @@ on 2026-09-07 against the actual built size (593,321 bytes) plus headroom,
 so the gate is enforcing real regressions again rather than routine growth.
 The Top 10 tables below are from the 2026-09-02 baseline and are stale
 pending a fresh `./scripts/wasm-size-report.sh` run; they are not read by
-the CI budget check (only the Total Binary Size line above is).
+the CI budget check (only the budget table below is).
+
+---
+
+## Size Budgets
+
+`scripts/check-wasm-size.sh` reads the machine-readable table below. Each
+checked contract MUST have exactly one row; a missing or malformed row is a
+hard error (the check exits non-zero) rather than a silent fallback to a
+default allowance. The `Budget (bytes)` value is the enforced ceiling before
+the tolerance above is applied.
+
+<!-- wasm-size-budget:begin -->
+| Contract | Budget (bytes) |
+|----------|----------------|
+| `scoregate-score` | 599000 |
+<!-- wasm-size-budget:end -->
 
 ---
 
@@ -70,7 +86,7 @@ Install `twiggy` using Cargo:
 
 ```bash
 cargo install twiggy
-```yaml
+```
 
 ### Running the Analysis Script
 
@@ -82,6 +98,7 @@ Run the automated reporting script:
 
 # Generate report for top 20 items to a specific markdown file:
 ./scripts/wasm-size-report.sh --top 20 --output docs/wasm-size-report-latest.md
+```
 
 ### Manual Analysis Commands
 
@@ -96,7 +113,7 @@ twiggy top -n 10 target/wasm32-unknown-unknown/release/scoregate_score.wasm
 
 # 3. View top retained size / dominator tree
 twiggy dominators -r 10 target/wasm32-unknown-unknown/release/scoregate_score.wasm
-```yaml
+```
 
 ---
 

@@ -94,7 +94,7 @@ fn test_apply_risk_threshold_after_delay() {
 #[test]
 fn test_apply_cooldown_after_delay() {
     let (env, client, _admin, _service) = setup();
-    client.set_cooldown(&Vec::new(&env), &120);
+    client.propose_cooldown_change(&Vec::new(&env), &120);
     env.ledger().with_mut(|l| l.timestamp += 86_400);
     client.apply_param_change(&symbol_short!("cooldown"));
     assert_eq!(client.get_cooldown(), 120);

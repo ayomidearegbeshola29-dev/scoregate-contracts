@@ -18,6 +18,14 @@ jobs:
       - name: Run deploy.sh manifest and drift tests
         run: bash tests/deploy/test_deploy.sh
 
+  bench-manifest:
+    name: Benchmark manifest check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every Criterion benchmark disables the default harness
+        run: bash scripts/check-bench-manifest.sh
+
   fmt:
     name: Format check
     runs-on: ubuntu-latest
@@ -41,6 +49,16 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
+
+  doc-links:
+    name: Local documentation links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Relative links between Markdown files must resolve to files in the repository. The checker
+      # reads files only: external URLs and anchors are not followed, so it needs no network.
+      - name: Check local Markdown links
+        run: python3 scripts/check-doc-links.py
 
   contract-build-lints:
     name: Contract-only dead-code check
@@ -79,10 +97,14 @@ jobs:
       - name: Run production acceptance suite
         run: scripts/production-acceptance.sh --output target/production-readiness-report.md
       - name: Upload production readiness report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: production-readiness-report
-          path: target/production-readiness-report.md
+          path: |
+            target/production-readiness-report.md
+            target/production-acceptance/**
+          if-no-files-found: warn
           retention-days: 14
 
   error-discriminants:

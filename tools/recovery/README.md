@@ -96,6 +96,23 @@ The report compares the `score`, `config`, and `auth` roots and the entry count,
 flagging each as `MATCH` or `DIVERGE`. Any divergence requires investigation
 before resuming normal operations.
 
+By default `reconcile` exits 0 even when the snapshots differ, so read `all_match`
+in the report. Scripts that should stop on a difference pass `--strict`:
+
+```bash
+cargo run -p recovery --manifest-path tools/recovery/Cargo.toml -- reconcile \
+  baseline.json current.json -o reconciliation-report.json --strict
+```
+
+| Exit status | Meaning |
+|-------------|---------|
+| `0` | The snapshots match, or they differ and `--strict` was not given |
+| `1` | The command failed, for example a snapshot that is missing or is not valid JSON |
+| `2` | Invalid command-line usage (reported by the argument parser) |
+| `3` | `--strict` only: the snapshots differ in a root or the entry count |
+
+With `--strict` the report is written before the tool exits with status 3.
+
 ### 4. Verify a snapshot
 
 ```bash

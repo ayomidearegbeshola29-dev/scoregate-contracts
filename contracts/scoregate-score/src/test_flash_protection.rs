@@ -43,6 +43,33 @@ fn submit(
         .map_err(|e| e.unwrap())
 }
 
+fn submit_batch(
+    client: &ScoreGateScoreContractClient,
+    env: &Env,
+    wallet: &Address,
+) -> Result<(), Error> {
+    let mut wallets = Vec::new(env);
+    wallets.push_back(wallet.clone());
+    let mut pairs = Vec::new(env);
+    pairs.push_back(symbol_short!("XLM_USDC"));
+    let mut scores = Vec::new(env);
+    scores.push_back(50u32);
+    let mut timestamps = Vec::new(env);
+    timestamps.push_back(START_TS);
+    let mut nonces = Vec::new(env);
+    nonces.push_back(1u64);
+    client
+        .try_submit_scores_batch(
+            &Vec::new(env),
+            &wallets,
+            &pairs,
+            &scores,
+            &timestamps,
+            &nonces,
+        )
+        .map_err(|e| e.unwrap())
+}
+
 // Same-ledger query + submit in Log mode: submission succeeds, event emitted.
 #[test]
 fn test_same_ledger_log_mode_allows_submission_and_emits_event() {
@@ -103,6 +130,19 @@ fn test_same_ledger_reject_mode_blocks_submission() {
 
     client.query_risk_gate(&wallet, &symbol_short!("XLM_USDC"), &75);
     assert_eq!(submit(&client, &env, &wallet), Err(Error::EpochClosed));
+}
+
+// Same-ledger gate read + batch submit in Reject mode: batch submission rejected.
+#[test]
+fn test_same_ledger_reject_mode_blocks_batch_submission() {
+    let (env, client) = setup();
+    let wallet = Address::generate(&env);
+
+    client.set_flash_protection_mode(&Vec::new(&env), &FlashProtectionMode::Reject);
+    assert_eq!(client.get_flash_protection_mode(), FlashProtectionMode::Reject);
+
+    client.query_risk_gate(&wallet, &symbol_short!("XLM_USDC"), &75);
+    assert_eq!(submit_batch(&client, &env, &wallet), Err(Error::EpochClosed));
 }
 
 // No gate read: submission proceeds normally regardless of mode.

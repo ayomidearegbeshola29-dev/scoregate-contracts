@@ -140,7 +140,7 @@ Permissionless. Returns the in-flight proposal so anyone can audit it during the
 Admin sets the time-lock delay applied to future proposals, bounded to `[MIN_UPGRADE_DELAY_SECS, MAX_UPGRADE_DELAY_SECS]` (48 hours – 14 days); out-of-range values are rejected with `InvalidUpgradeDelay`. Defaults to 48 hours.
 
 ### `set_cooldown(secs: u64)` / `get_cooldown() -> u64`
-Admin sets the cooldown enforced between accepted submissions for the same `(wallet, asset_pair)`, bounded to `[MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS]` (1 minute – 24 hours); out-of-range values are rejected with `InvalidCooldown`. Defaults to 1 hour. See [Rate Limiting](#rate-limiting).
+Admin sets the cooldown enforced between accepted submissions for the same `(wallet, asset_pair)`, bounded to `[MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS]` (1 minute – 24 hours); out-of-range values are rejected with `InvalidCooldown`. Defaults to 1 hour. The change is immediate and stages no proposal; use `propose_cooldown_change(admin_signers, secs)` for a change that waits out the parameter-change delay and is applied with `apply_param_change(cooldown)`. See [Rate Limiting](#rate-limiting) and [Cooldown: immediate and delayed changes](docs/governance.md#cooldown-immediate-and-delayed-changes).
 
 ### `override_rate_limit(wallet: Address, asset_pair: Symbol)`
 Admin-only emergency escape hatch. Immediately clears the stored cooldown deadline for `(wallet, asset_pair)`, so the next `submit_score` / `submit_scores_batch` call for that pair is accepted regardless of how recently the last one was. Intended for correcting a known-bad score right away, not for routine use. Emits `rl_ovrd`.
@@ -844,3 +844,12 @@ Contributions are welcome. ScoreGate is an open-source public good built for the
 
 <!-- handsoff-issue-284 -->
 - #284: add_admin_signer and remove_admin_signer Omit Event Emissions and Governance Audit Chain Records
+
+<!-- handsoff-issue-373 -->
+- #373: Preserve map key and value types across generated bindings
+
+<!-- handsoff-issue-375 -->
+- #375: Enforce XDR integer ranges in runtime schema validators
+
+<!-- handsoff-issue-376 -->
+- #376: Align Python model handling of unknown fields with JSON Schema

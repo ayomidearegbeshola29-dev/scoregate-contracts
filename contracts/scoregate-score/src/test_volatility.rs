@@ -72,8 +72,8 @@ fn test_set_volatility_window() {
 fn test_volatility_resets_after_window_expires() {
     let (env, client, admin, _service) = initialized();
     let pair = symbol_short!("XLM_USDC");
-    // Set a short window
-    client.set_pair_volatility_window(&Vec::from_array(&env, [admin.clone()]), &60);
+    // A window longer than the gap between submissions, which is 3_601 s here
+    client.set_pair_volatility_window(&Vec::from_array(&env, [admin.clone()]), &7_200);
 
     let w1 = Address::generate(&env);
     submit(&env, &client, &w1, &pair, 10);
@@ -82,7 +82,7 @@ fn test_volatility_resets_after_window_expires() {
     assert!(client.get_pair_volatility(&pair) > 0);
 
     // Jump past the window so next submission resets state
-    env.ledger().with_mut(|l| l.timestamp += 100);
+    env.ledger().with_mut(|l| l.timestamp += 10_000);
     let w3 = Address::generate(&env);
     submit(&env, &client, &w3, &pair, 50);
     // After reset, only 1 sample → volatility = 0

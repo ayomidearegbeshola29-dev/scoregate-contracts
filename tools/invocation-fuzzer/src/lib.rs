@@ -691,6 +691,10 @@ fn update_maximum(maximum: &mut ResourceReport, current: &ResourceReport) {
     maximum.contract_events = maximum.contract_events.max(current.contract_events);
 }
 
+fn failure_fingerprint(error: &anyhow::Error) -> String {
+    error.root_cause().to_string()
+}
+
 pub fn run_fuzz(corpus: Vec<Campaign>, seed: u64, cases: usize) -> Result<FuzzSummary> {
     if cases == 0 || cases > MAX_CASES {
         bail!("cases must be within 1..={MAX_CASES}");
@@ -727,12 +731,23 @@ pub fn run_fuzz(corpus: Vec<Campaign>, seed: u64, cases: usize) -> Result<FuzzSu
         let report = match replay_campaign(&child) {
             Ok(report) => report,
             Err(error) => {
-                let minimized =
-                    shrink_campaign(child, |candidate| replay_campaign(candidate).is_err());
+                let initial_fingerprint = failure_fingerprint(&error);
+                let minimized = shrink_campaign(child, |candidate| {
+                    match replay_campaign(candidate) {
+                        Ok(_) => false,
+                        Err(candidate_err) => failure_fingerprint(&candidate_err) == initial_fingerprint,
+                    }
+                });
+                let minimized_fingerprint = replay_campaign(&minimized)
+                    .err()
+                    .map(|e| failure_fingerprint(&e))
+                    .unwrap_or_else(|| "none".to_string());
                 let path = persist_failure(&minimized)?;
                 return Err(error).with_context(|| {
                     format!(
-                        "generated case {index} failed; minimized replay saved to {}; replay with: cargo run -p invocation-fuzzer --locked -- replay {}",
+                        "generated case {index} failed (fingerprint: '{}', minimized: '{}'); minimized replay saved to {}; replay with: cargo run -p invocation-fuzzer --locked -- replay {}",
+                        initial_fingerprint,
+                        minimized_fingerprint,
                         path.display(),
                         path.display(),
                     )

@@ -51,6 +51,9 @@ mod test_parameter_governance;
 mod test_two_person_control;
 
 #[cfg(test)]
+mod error_coverage;
+
+#[cfg(test)]
 mod test_batch_ttl_optimization;
 
 #[cfg(test)]
@@ -1628,6 +1631,7 @@ impl ScoreGateScoreContract {
                                 );
                             }
                             storage::update_model_stats(&env, ns.model_version, ns.score);
+                            Self::update_pair_volatility(&env, &ns.asset_pair, ns.score);
                             storage::update_historical_max_score(
                                 &env,
                                 &ns.wallet,
@@ -2066,6 +2070,7 @@ impl ScoreGateScoreContract {
                             storage::increment_total_wallets_scored(&env);
                         }
                         storage::update_model_stats(&env, sub.model_version, sub.score);
+                        Self::update_pair_volatility(&env, &sub.asset_pair, sub.score);
                         storage::update_historical_max_score(
                             &env,
                             &sub.wallet,
@@ -3763,6 +3768,12 @@ impl ScoreGateScoreContract {
         Self::require_mandatory_reviewers_approved(&env, &key)?;
         match &pending.new_value {
             ParamValue::U32(v) if key == symbol_short!("risk_thr") => {
+                // The margin is changed immediately by `set_hysteresis_margin`, so it can differ
+                // from the one in force when this threshold was proposed. The proposal stays
+                // pending so the margin can be lowered and the change applied again.
+                if !Self::hysteresis_allows_threshold(*v, storage::get_hysteresis_margin(&env)) {
+                    return Err(Error::InvalidHysteresisMargin);
+                }
                 storage::set_risk_threshold(&env, *v)
             }
             ParamValue::U32(v) if key == symbol_short!("hist_dep") => {
@@ -3830,6 +3841,10 @@ impl ScoreGateScoreContract {
         if !(constants::MIN_COOLDOWN_SECS..=constants::MAX_COOLDOWN_SECS).contains(&cooldown_secs) {
             return Err(Error::InvalidCooldown);
         }
+        if !Self::hysteresis_allows_threshold(risk_threshold, storage::get_hysteresis_margin(&env))
+        {
+            return Err(Error::InvalidHysteresisMargin);
+        }
         Self::require_admin_auth(&env, &admin_signers)?;
         if storage::has_pending_policy_bundle(&env) {
             return Err(Error::ParamChangeAlreadyPending);
@@ -3866,6 +3881,13 @@ impl ScoreGateScoreContract {
         }
         let bundle_key = symbol_short!("pol_bdl");
         Self::require_mandatory_reviewers_approved(&env, &bundle_key)?;
+        // Re-check against the margin in force now; the bundle stays pending if it conflicts.
+        if !Self::hysteresis_allows_threshold(
+            pending.bundle.risk_threshold,
+            storage::get_hysteresis_margin(&env),
+        ) {
+            return Err(Error::InvalidHysteresisMargin);
+        }
         storage::set_risk_threshold(&env, pending.bundle.risk_threshold);
         storage::set_cooldown_secs(&env, pending.bundle.cooldown_secs);
         storage::clear_pending_policy_bundle(&env);
@@ -4236,10 +4258,13 @@ impl ScoreGateScoreContract {
 
     /// Sets the correlation coefficient between two asset pairs for use in
     /// portfolio VaR calculations. `corr` is scaled ×10 000 (e.g. `5000`
-    /// represents ρ = 0.5). Valid range: [-10 000, 10 000]. Admin only.
+    /// represents ρ = 0.5). Valid range: [-10 000, 10 000], both ends included. Admin only.
     ///
     /// # Errors
     /// - [`Error::NotInitialized`] if `initialize` has not been called.
+    /// - [`Error::InvalidCorrelation`] if `corr` is outside
+    ///   [`constants::MIN_PAIR_CORRELATION`]..=[`constants::MAX_PAIR_CORRELATION`]. Nothing is
+    ///   stored, so the previous coefficient stays in force.
     pub fn set_pair_correlation(
         env: Env,
         pair_a: Symbol,
@@ -4250,6 +4275,9 @@ impl ScoreGateScoreContract {
             return Err(Error::NotInitialized);
         }
         storage::get_admin(&env).require_auth();
+        if !(constants::MIN_PAIR_CORRELATION..=constants::MAX_PAIR_CORRELATION).contains(&corr) {
+            return Err(Error::InvalidCorrelation);
+        }
         storage::set_pair_correlation(&env, &pair_a, &pair_b, corr);
         #[cfg(any(test, feature = "testutils"))]
         invariants::invariant_check(&env);
@@ -4572,10 +4600,11 @@ impl ScoreGateScoreContract {
     // ── Per-pair 24h score volatility index (#270) ────────────────────────────
 
     /// Returns the rolling score volatility index for `asset_pair`, scaled ×100.
-    /// The volatility is the population standard deviation of scores submitted
-    /// within the last `get_pair_volatility_window()` seconds, computed
-    /// incrementally via Welford's algorithm on every `submit_score`.
-    /// Returns `0` when fewer than 2 samples exist.
+    /// The volatility is the population standard deviation (rounded down) of the accepted scores
+    /// of the pair in the current series, computed incrementally via Welford's algorithm each time
+    /// a score is finalized. A series restarts when no score was accepted for the pair during the
+    /// last `get_pair_volatility_window()` seconds, and an expired series reads as `0` until the
+    /// next accepted score. Returns `0` when fewer than 2 samples exist.
     ///
     /// # Examples
     ///
@@ -4598,6 +4627,10 @@ impl ScoreGateScoreContract {
             Some(s) => s,
             None => return 0,
         };
+        let window = storage::get_pair_volatility_window(&env);
+        if env.ledger().timestamp() > state.last_updated.saturating_add(window) {
+            return 0;
+        }
         if state.count < 2 {
             return 0;
         }
@@ -8243,6 +8276,14 @@ impl ScoreGateScoreContract {
     /// value will emit a `threshold_breached` event on every submission.
     /// Admin only.
     ///
+    /// A threshold that the active hysteresis margin could not exit from is rejected (see
+    /// [`Self::set_hysteresis_margin`]): with a margin above 0 the threshold must be greater than
+    /// the margin. The same rule is checked again when the change is applied.
+    ///
+    /// # Errors
+    /// - [`Error::InvalidHysteresisMargin`] if the active margin is above 0 and not below
+    ///   `threshold`, which would leave no score that clears the high-risk band.
+    ///
     /// # Examples
     ///
     /// ```
@@ -8272,6 +8313,9 @@ impl ScoreGateScoreContract {
         }
         if threshold > constants::MAX_SCORE {
             return Err(Error::InvalidScore);
+        }
+        if !Self::hysteresis_allows_threshold(threshold, storage::get_hysteresis_margin(&env)) {
+            return Err(Error::InvalidHysteresisMargin);
         }
         Self::require_admin_auth(&env, &admin_signers)?;
         let key = symbol_short!("risk_thr");
@@ -8457,7 +8501,9 @@ impl ScoreGateScoreContract {
     /// - [`Error::NotInitialized`] if the contract has no admin yet.
     /// - [`Error::InvalidHysteresisMargin`] if `margin` exceeds
     ///   [`constants::MAX_HYSTERESIS_MARGIN`] (50) or is `>=` the current
-    ///   risk threshold (which would invert the exit band).
+    ///   risk threshold (which would invert the exit band). Threshold changes
+    ///   (`set_risk_threshold`, `apply_param_change` for `risk_thr`, and policy
+    ///   bundles) are held to the same rule against the margin in force.
     /// - [`Error::Unauthorized`] if the caller is not the admin.
     ///
     /// # Examples
@@ -9271,6 +9317,14 @@ impl ScoreGateScoreContract {
     /// `[MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS]` (1 minute – 24 hours).
     /// Admin only.
     ///
+    /// **Immediate legacy path.** The new cooldown is in force as soon as this call returns, and
+    /// the only event is `cd_upd`. It creates no pending proposal, so `apply_param_change` has
+    /// nothing to apply afterwards; a pending proposal made with
+    /// [`Self::propose_cooldown_change`] is superseded and removed, so it cannot overwrite this
+    /// value later. Use [`Self::propose_cooldown_change`] for a change that takes effect after the
+    /// time lock. (Before this separation the call also stored a time-locked proposal that
+    /// re-applied the same value; its effect on the cooldown is unchanged.)
+    ///
     /// # Examples
     ///
     /// ```
@@ -9300,6 +9354,44 @@ impl ScoreGateScoreContract {
         }
         Self::require_admin_auth(&env, &admin_signers)?;
         let key = symbol_short!("cooldown");
+        if storage::has_pending_param_change(&env, &key) {
+            storage::clear_pending_param_change(&env, &key);
+            storage::clear_review_approvals(&env, &key);
+        }
+        storage::set_cooldown_secs(&env, secs);
+        events::cooldown_updated(&env, secs);
+        Ok(())
+    }
+
+    /// Proposes a new cooldown that takes effect only after the parameter-change delay
+    /// (`get_param_change_delay()`). Nothing changes now: `get_cooldown()` keeps returning the
+    /// current value until [`Self::apply_param_change`] is called for the `cooldown` key at or after
+    /// `apply_after`, which writes the value and emits `pc_appl` and `cd_upd`. The proposal emits
+    /// `pc_prop` and is the only pending state. Admin only.
+    ///
+    /// This is the delayed counterpart of [`Self::set_cooldown`], which applies immediately.
+    ///
+    /// # Errors
+    /// - [`Error::NotInitialized`] if the contract has no admin yet.
+    /// - [`Error::InvalidCooldown`] if `secs` is outside
+    ///   `[MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS]`.
+    /// - [`Error::ParamChangeAlreadyPending`] if a cooldown proposal is already pending.
+    pub fn propose_cooldown_change(
+        env: Env,
+        admin_signers: Vec<Address>,
+        secs: u64,
+    ) -> Result<(), Error> {
+        if !storage::has_admin(&env) {
+            return Err(Error::NotInitialized);
+        }
+        if !(constants::MIN_COOLDOWN_SECS..=constants::MAX_COOLDOWN_SECS).contains(&secs) {
+            return Err(Error::InvalidCooldown);
+        }
+        Self::require_admin_auth(&env, &admin_signers)?;
+        let key = symbol_short!("cooldown");
+        if storage::has_pending_param_change(&env, &key) {
+            return Err(Error::ParamChangeAlreadyPending);
+        }
         let now = env.ledger().timestamp();
         let apply_after = now.saturating_add(storage::get_param_change_delay(&env));
         storage::set_pending_param_change(
@@ -9313,8 +9405,6 @@ impl ScoreGateScoreContract {
         );
         storage::clear_review_approvals(&env, &key);
         events::param_change_proposed(&env, &key, apply_after);
-        storage::set_cooldown_secs(&env, secs);
-        events::cooldown_updated(&env, secs);
         Ok(())
     }
 
@@ -11264,6 +11354,14 @@ impl ScoreGateScoreContract {
     /// - Currently in band AND `score >= (risk_threshold - margin)` → stay in
     ///   band (hysteresis: score dropped but not below the exit boundary).
     /// - Not in band AND `score < risk_threshold` → nothing to do.
+    /// Whether `margin` leaves a band exit that a score can reach under `risk_threshold`. A wallet
+    /// leaves the high-risk band for `score < risk_threshold - margin`, which no score satisfies once
+    /// a nonzero margin reaches the threshold, so such a pair would trap wallets in the band. A margin
+    /// of 0 has no hysteresis, so it never conflicts.
+    fn hysteresis_allows_threshold(risk_threshold: u32, margin: u32) -> bool {
+        margin == 0 || margin < risk_threshold
+    }
+
     fn evaluate_risk_band(
         env: &Env,
         wallet: &Address,
@@ -12126,6 +12224,7 @@ impl ScoreGateScoreContract {
             storage::increment_total_wallets_scored(env);
         }
         storage::update_model_stats(env, risk_score.model_version, risk_score.score);
+        Self::update_pair_volatility(env, asset_pair, risk_score.score);
         storage::update_historical_max_score(env, wallet, asset_pair, risk_score.score);
         storage::update_histogram_on_write(env, previous_score, risk_score.score);
         Self::update_welford_correlation(env, wallet, asset_pair, risk_score.score);
@@ -12333,8 +12432,14 @@ impl ScoreGateScoreContract {
         false
     }
 
-    /// Incremental Welford update for per-pair score volatility.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    /// Incremental Welford update for per-pair score volatility. It runs exactly once for every
+    /// accepted observation, in the finalization path shared by single, consensus and
+    /// pending-commit submissions and in the two batch routes. Rejected submissions and scores
+    /// still held in escrow or pending do not reach it.
+    ///
+    /// Units: `mean_scaled` is the mean score ×1_000 and `m2_scaled` is the sum of squared
+    /// deviations ×1_000_000, which is what `get_pair_volatility` reads. The series restarts when
+    /// the previous observation is older than the volatility window.
     fn update_pair_volatility(env: &Env, asset_pair: &Symbol, score: u32) {
         use crate::types::PairVolatilityState;
         let now = env.ledger().timestamp();
@@ -12361,10 +12466,8 @@ impl ScoreGateScoreContract {
         let delta = score_scaled - state.mean_scaled;
         state.mean_scaled += delta / state.count;
         let delta2 = score_scaled - state.mean_scaled;
-        // m2_scaled accumulates in units of (score_unit × 1000)^2 / 1_000_000 = score_unit^2 × 1
-        // Keep m2_scaled as integer approximation: delta × delta2 / 1_000_000
-        state.m2_scaled =
-            state.m2_scaled.saturating_add((delta / 1_000).saturating_mul(delta2 / 1_000));
+        // Both deltas are in score × 1_000, so their product is in score² × 1_000_000.
+        state.m2_scaled = state.m2_scaled.saturating_add(delta.saturating_mul(delta2));
 
         storage::set_pair_volatility_state(env, asset_pair, &state);
     }

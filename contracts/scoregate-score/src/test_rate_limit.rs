@@ -366,7 +366,7 @@ fn test_set_cooldown_above_max_rejected() {
 fn test_set_cooldown_within_bounds_applied() {
     let (env, client, _admin) = setup();
     // Propose and apply the short cooldown (time-locked).
-    client.set_cooldown(&Vec::new(&env), &MIN_COOLDOWN_SECS);
+    client.propose_cooldown_change(&Vec::new(&env), &MIN_COOLDOWN_SECS);
     env.ledger().with_mut(|l| l.timestamp += 86_400);
     client.apply_param_change(&symbol_short!("cooldown"));
     assert_eq!(client.get_cooldown(), MIN_COOLDOWN_SECS);
@@ -408,12 +408,12 @@ fn test_set_cooldown_boundary_values_accepted() {
     let (env, client, _admin) = setup();
     let key = symbol_short!("cooldown");
 
-    client.set_cooldown(&Vec::new(&env), &MIN_COOLDOWN_SECS);
+    client.propose_cooldown_change(&Vec::new(&env), &MIN_COOLDOWN_SECS);
     env.ledger().with_mut(|l| l.timestamp += 86_400);
     client.apply_param_change(&key);
     assert_eq!(client.get_cooldown(), MIN_COOLDOWN_SECS);
 
-    client.set_cooldown(&Vec::new(&env), &MAX_COOLDOWN_SECS);
+    client.propose_cooldown_change(&Vec::new(&env), &MAX_COOLDOWN_SECS);
     env.ledger().with_mut(|l| l.timestamp += 86_400);
     client.apply_param_change(&key);
     assert_eq!(client.get_cooldown(), MAX_COOLDOWN_SECS);

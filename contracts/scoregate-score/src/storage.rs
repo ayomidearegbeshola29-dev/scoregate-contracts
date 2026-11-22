@@ -1111,6 +1111,21 @@ pub fn get_service_threshold(env: &Env) -> u32 {
 
 // ── Model stats ───────────────────────────────────────────────────────────────
 
+/// Fills in the summary fields of `stats` from its counters, which are the canonical record:
+/// `total_submissions` is `submission_count`, and `average_score` is `score_sum / submission_count`
+/// rounded down (0 when nothing has been recorded). Records stored before the summary was kept
+/// have zeros there, so this is applied on every read as well as every write.
+fn with_model_summary(mut stats: ModelVersionStats) -> ModelVersionStats {
+    stats.total_submissions = stats.submission_count as u64;
+    stats.average_score = match stats.submission_count {
+        0 => 0,
+        count => (stats.score_sum / count as u64) as u32,
+    };
+    stats
+}
+
+/// Records one accepted score for `model_version`. Callers invoke it only once a score has been
+/// finalized, so rejected and still-pending submissions never reach the statistics.
 pub fn update_model_stats(env: &Env, model_version: u32, score: u32) {
     let key = DataKeyB::ModelStats(model_version);
     let mut stats: ModelVersionStats =
@@ -1123,6 +1138,7 @@ pub fn update_model_stats(env: &Env, model_version: u32, score: u32) {
         });
     stats.submission_count += 1;
     stats.score_sum += score as u64;
+    let stats = with_model_summary(stats);
     env.storage().instance().set(&key, &stats);
 
     let idx_key = DataKeyB::ModelVersionIndex;
@@ -1135,7 +1151,9 @@ pub fn update_model_stats(env: &Env, model_version: u32, score: u32) {
 }
 
 pub fn get_model_stats(env: &Env, model_version: u32) -> Option<ModelVersionStats> {
-    env.storage().instance().get(&DataKeyB::ModelStats(model_version))
+    let stats: Option<ModelVersionStats> =
+        env.storage().instance().get(&DataKeyB::ModelStats(model_version));
+    stats.map(with_model_summary)
 }
 
 pub fn get_all_model_versions(env: &Env) -> Vec<u32> {

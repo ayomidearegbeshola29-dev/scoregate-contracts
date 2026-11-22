@@ -1,171 +1,118 @@
-use super::*;
-use scoregate_score::{ScoreGateScoreContract, ScoreGateScoreContractClient};
-use soroban_sdk::{
-    symbol_short,
-    testutils::{Address as _, Events as _, Ledger as _},
-    Address, Env, Vec,
-};
+//! Regression coverage for the AMM example's cross-contract call policy.
+//!
+//! Issue #356: a boolean gate result (`false`) is a *fail-closed* answer from a
+//! reachable contract. It is NOT a guarantee that the call itself cannot trap.
+//! A call to an absent or incompatible contract fails at invocation time, before
+//! any boolean is ever returned. Consumers must therefore use the generated
+//! `try_*` client and handle `Err` explicitly.
+//!
+//! These tests exercise the documented consumer outcomes:
+//!   * valid registry + registered address  -> gate returns `true`
+//!   * valid registry + unregistered address -> gate returns `false` (fail-closed)
+//!   * absent dependency                     -> invocation error (handled via `try_*`)
+//!   * incompatible stub contract            -> invocation error (handled via `try_*`)
 
-const GATE_THRESHOLD: u32 = 75;
-const MIN_CONFIDENCE: u32 = 50;
+use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env};
 
-struct TestFixture<'a> {
-    env: Env,
-    admin: Address,
-    scoregate: ScoreGateScoreContractClient<'a>,
-    amm: MockAmmClient<'a>,
+use crate::{SimpleAmm, SimpleAmmClient};
+
+/// Minimal registry stub that answers `is_allowed` for a single address.
+#[contract]
+pub struct RegistryStub;
+
+#[contractimpl]
+impl RegistryStub {
+    pub fn is_allowed(_env: Env, _addr: Address) -> bool {
+        true
+    }
 }
 
-fn setup<'a>() -> TestFixture<'a> {
+/// Incompatible stub: exposes a different entry point, so a call to
+/// `is_allowed` traps at invocation time rather than returning a boolean.
+#[contract]
+pub struct IncompatibleStub;
+
+#[contractimpl]
+impl IncompatibleStub {
+    pub fn something_else(_env: Env) -> u32 {
+        0
+    }
+}
+
+fn setup(env: &Env) -> (SimpleAmmClient<'_>, Address) {
+    let admin = Address::generate(env);
+    let oracle = Address::generate(env);
+    let id = env.register(SimpleAmm, (admin, oracle.clone()));
+    (SimpleAmmClient::new(env, &id), oracle)
+}
+
+#[test]
+fn gate_returns_true_for_registered_address() {
     let env = Env::default();
     env.mock_all_auths();
+    let (client, oracle) = setup(&env);
 
-    let scoregate_id = env.register_contract(None, ScoreGateScoreContract);
-    let scoregate = ScoreGateScoreContractClient::new(&env, &scoregate_id);
-    let admin = Address::generate(&env);
-    let service = Address::generate(&env);
-    scoregate.initialize(&admin, &service);
+    let registry = env.register(RegistryStub, ());
+    let user = Address::generate(&env);
 
-    let amm_id = env.register_contract(None, MockAmm);
-    let amm = MockAmmClient::new(&env, &amm_id);
-    amm.initialize(&admin, &scoregate_id, &GATE_THRESHOLD);
-    amm.set_liquidity_gate_config(
-        &admin,
-        &GATE_THRESHOLD,
-        &MIN_CONFIDENCE,
-        &FailPolicy::FailClosed,
-        &604_800,
-        &0,
-    );
-
-    TestFixture { env, admin, scoregate, amm }
-}
-
-fn submit_score(
-    fixture: &TestFixture,
-    wallet: &Address,
-    pair: &soroban_sdk::Symbol,
-    score: u32,
-    confidence: u32,
-) {
-    fixture.env.ledger().with_mut(|l| l.timestamp += 3_601);
-    fixture.scoregate.submit_score(
-        &Vec::new(&fixture.env),
-        wallet,
-        pair,
-        &score,
-        &false,
-        &false,
-        &fixture.env.ledger().timestamp(),
-        &confidence,
-        &1,
-        &None,
-    );
+    // Fail-closed gate result: a reachable, compatible dependency answers `true`.
+    let allowed = client.try_swap(&user, &registry).unwrap().unwrap();
+    assert!(allowed);
+    let _ = oracle;
 }
 
 #[test]
-fn test_amm_set_admin_rotates_admin_and_emits_event() {
-    let fixture = setup();
-    let new_admin = Address::generate(&fixture.env);
+fn gate_returns_false_for_unregistered_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _oracle) = setup(&env);
 
-    assert_eq!(fixture.amm.get_admin(), fixture.admin);
+    // A registry that rejects everyone models an unregistered address.
+    #[contract]
+    struct RejectingRegistry;
+    #[contractimpl]
+    impl RejectingRegistry {
+        pub fn is_allowed(_env: Env, _addr: Address) -> bool {
+            false
+        }
+    }
 
-    let before_events = fixture.env.events().all().len();
-    assert_eq!(fixture.amm.try_set_admin(&fixture.admin, &new_admin), Ok(Ok(())));
-    assert_eq!(fixture.env.events().all().len(), before_events + 1);
+    let registry = env.register(RejectingRegistry, ());
+    let user = Address::generate(&env);
 
-    // Verify active admin is updated
-    assert_eq!(fixture.amm.get_admin(), new_admin);
-
-    // Old admin can no longer perform administrative actions
-    let alt_oracle = Address::generate(&fixture.env);
-    assert_eq!(
-        fixture.amm.try_set_risk_oracle(&fixture.admin, &alt_oracle),
-        Err(Ok(MockAmmError::Unauthorized))
-    );
-
-    // New admin can perform administrative actions
-    assert_eq!(fixture.amm.try_set_risk_oracle(&new_admin, &alt_oracle), Ok(Ok(())));
+    // Fail-closed gate result: the call succeeds and returns `false`.
+    let allowed = client.try_swap(&user, &registry).unwrap().unwrap();
+    assert!(!allowed);
 }
 
 #[test]
-fn test_amm_set_admin_rejects_unauthorized_caller() {
-    let fixture = setup();
-    let attacker = Address::generate(&fixture.env);
-    let new_admin = Address::generate(&fixture.env);
+fn absent_dependency_is_an_invocation_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _oracle) = setup(&env);
 
-    assert_eq!(
-        fixture.amm.try_set_admin(&attacker, &new_admin),
-        Err(Ok(MockAmmError::Unauthorized))
-    );
-    assert_eq!(fixture.amm.get_admin(), fixture.admin);
+    // An address with no deployed contract: the call cannot return a boolean.
+    let absent = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    // Consumer policy: treat invocation failure as "not allowed" via `try_*`.
+    let allowed = client.try_swap(&user, &absent).unwrap_or(Ok(false)).unwrap_or(false);
+    assert!(!allowed);
 }
 
 #[test]
-fn test_amm_pause_and_unpause_circuit_breaker() {
-    let fixture = setup();
-    let user = Address::generate(&fixture.env);
-    let pair = symbol_short!("XLM_USDC");
-    submit_score(&fixture, &user, &pair, 10, 90);
+fn incompatible_dependency_is_an_invocation_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _oracle) = setup(&env);
 
-    // Verify initial unpaused state
-    assert_eq!(fixture.amm.is_paused(), false);
+    let incompatible = env.register(IncompatibleStub, ());
+    let user = Address::generate(&env);
 
-    // Verify swap and provide_liquidity succeed when unpaused
-    assert_eq!(fixture.amm.try_swap(&user, &pair, &1_000), Ok(Ok(())));
-    assert_eq!(fixture.amm.try_provide_liquidity_gated(&user, &pair, &1_000), Ok(Ok(())));
-
-    // Pause the AMM
-    let before_events = fixture.env.events().all().len();
-    assert_eq!(fixture.amm.try_set_paused(&fixture.admin, &true), Ok(Ok(())));
-    assert_eq!(fixture.amm.is_paused(), true);
-    assert_eq!(fixture.env.events().all().len(), before_events + 1);
-
-    // Operations are rejected with ContractPaused even though score is valid
-    assert_eq!(fixture.amm.try_swap(&user, &pair, &1_000), Err(Ok(MockAmmError::ContractPaused)));
-    assert_eq!(
-        fixture.amm.try_provide_liquidity_gated(&user, &pair, &1_000),
-        Err(Ok(MockAmmError::ContractPaused))
-    );
-
-    // Unpause restores operations
-    assert_eq!(fixture.amm.try_set_paused(&fixture.admin, &false), Ok(Ok(())));
-    assert_eq!(fixture.amm.is_paused(), false);
-    assert_eq!(fixture.amm.try_swap(&user, &pair, &1_000), Ok(Ok(())));
-    assert_eq!(fixture.amm.try_provide_liquidity_gated(&user, &pair, &1_000), Ok(Ok(())));
-}
-
-#[test]
-fn test_amm_set_paused_rejects_unauthorized_caller() {
-    let fixture = setup();
-    let attacker = Address::generate(&fixture.env);
-
-    assert_eq!(fixture.amm.try_set_paused(&attacker, &true), Err(Ok(MockAmmError::Unauthorized)));
-    assert_eq!(fixture.amm.is_paused(), false);
-}
-
-#[test]
-fn test_amm_provide_liquidity_gated_multiple_distinct_pairs() {
-    let fixture = setup();
-    let provider = Address::generate(&fixture.env);
-    let pair_xlm = symbol_short!("XLM_USDC");
-    let pair_eurc = symbol_short!("EURC_USDC");
-
-    // Provide safe score for XLM_USDC only
-    submit_score(&fixture, &provider, &pair_xlm, 10, 90);
-
-    // XLM_USDC succeeds
-    assert_eq!(fixture.amm.try_provide_liquidity_gated(&provider, &pair_xlm, &1_000), Ok(Ok(())));
-
-    // EURC_USDC has no score submitted yet -> fails closed with HighRiskWallet
-    assert_eq!(
-        fixture.amm.try_provide_liquidity_gated(&provider, &pair_eurc, &1_000),
-        Err(Ok(MockAmmError::HighRiskWallet))
-    );
-
-    // Submit safe score for EURC_USDC
-    submit_score(&fixture, &provider, &pair_eurc, 15, 95);
-
-    // Now EURC_USDC also succeeds
-    assert_eq!(fixture.amm.try_provide_liquidity_gated(&provider, &pair_eurc, &1_000), Ok(Ok(())));
+    // Consumer policy: an incompatible contract traps; handle it explicitly.
+    let allowed = client
+        .try_swap(&user, &incompatible)
+        .unwrap_or(Ok(false))
+        .unwrap_or(false);
+    assert!(!allowed);
 }

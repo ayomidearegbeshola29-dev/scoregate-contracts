@@ -10,6 +10,25 @@ When a fixture case needs to change (e.g., adding a new error code or boundary c
 2. Ensure the Rust conformance test still passes (`cargo test -p composability-tests --test sdk_conformance`), adjusting the contract or test harness if necessary.
 3. Once the updated fixture is merged here, downstream SDK repositories (TypeScript/Python) can pull the new JSON and update their own runners.
 
+## What a passing run establishes
+
+The Rust runner checks everything the fixture declares, not only the case outcomes:
+
+| Fixture field | Enforced by the runner |
+| --- | --- |
+| `schema_version` | Must be `1`. Any other value fails parsing before the rest is read. |
+| unknown fields | The top level and `resource_bounds` reject unknown fields, so a newly advertised metric fails parsing until the runner handles it. |
+| `contract_capabilities` | Each entry must be reported by `supports_interface` on the deployed ScoreGate contract, for every case. |
+| `resource_bounds.wallets`, `asset_pairs`, `oracle_contracts` | Each case must involve exactly this many distinct wallets, asset pairs and oracle contracts. |
+| `resource_bounds.ledger_writes_per_read_only_decision` | Upper bound on the persistent ledger entries added, changed or removed by the decision. |
+| `resource_bounds.events_per_decision` | Upper bound on the events the ScoreGate contract emits during the decision. Events the consumer publishes for itself, such as the mock AMM's `liquidity_provided`, are not counted. |
+| `resource_bounds.encoded_input_bytes_max` | Upper bound on the XDR size of the decision's arguments (provider, asset pair, amount). |
+| `resource_bounds.ledger_reads_per_decision_max` | **Informational only.** The Soroban 21 test environment does not expose a per-call read count, so the runner prints the value and does not enforce it. |
+| `sdk_assertions` | Guidance for the TypeScript and Python runners; not checked here. |
+
+Lowering a bound below what the runner observes, or declaring a capability the
+contract does not report, fails the conformance test.
+
 ## Contract
 
 The fixtures exercise production-shaped consumers, not direct happy-path calls

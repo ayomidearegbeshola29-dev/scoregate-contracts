@@ -42,8 +42,13 @@ if [ "$NETWORK" = "mainnet" ]; then
   echo "  ║  MAINNET ROLLBACK — this action cannot be undone    ║"
   echo "  ╚══════════════════════════════════════════════════════╝"
   echo ""
-  read -rp "  Type 'rollback-mainnet' to confirm: " CONFIRM
-  [ "$CONFIRM" = "rollback-mainnet" ] || { echo "Aborted."; exit 1; }
+  if [ "$DRY_RUN" = true ]; then
+    # A dry run changes nothing, so it must not wait for input; say what a live run would ask.
+    echo "[dry-run] A live mainnet run stops here until 'rollback-mainnet' is typed; no prompt in a dry run."
+  else
+    read -rp "  Type 'rollback-mainnet' to confirm: " CONFIRM
+    [ "$CONFIRM" = "rollback-mainnet" ] || { echo "Aborted."; exit 1; }
+  fi
 fi
 
 # ── Validate previous WASM ────────────────────────────────────
@@ -91,8 +96,12 @@ log "   soroban contract invoke --id $TARGET_CONTRACT_ID --source $ADMIN_IDENTIT
 log "   Execute only after executable_after has passed."
 
 # ── Step 3: Execute the rollback ──────────────────────────────
-read -rp "  Execute the rollback upgrade now? (yes/no): " EXECUTE_CONFIRM
-[ "$EXECUTE_CONFIRM" = "yes" ] || { log "Rollback aborted by operator."; exit 0; }
+if [ "$DRY_RUN" = true ]; then
+  echo "[dry-run] A live run asks 'Execute the rollback upgrade now? (yes/no)' here and stops unless the answer is 'yes'; no prompt in a dry run."
+else
+  read -rp "  Execute the rollback upgrade now? (yes/no): " EXECUTE_CONFIRM
+  [ "$EXECUTE_CONFIRM" = "yes" ] || { log "Rollback aborted by operator."; exit 0; }
+fi
 
 log "Step 3: Executing rollback upgrade"
 if [ "$DRY_RUN" = true ]; then
@@ -138,6 +147,31 @@ if [ "$DRY_RUN" = false ]; then
   fi
 
   log "Rollback admin verified: $VERIFY_ADMIN"
+
+  # get_version and get_admin cannot tell the reviewed previous binary from another one, so
+  # compare the code the contract now runs with the WASM installed in Step 0.
+  ACTIVE_WASM_FILE=$(mktemp)
+  trap 'rm -f "$ACTIVE_WASM_FILE"' EXIT
+  if ! soroban contract fetch \
+    --id "$TARGET_CONTRACT_ID" \
+    --network "$NETWORK" \
+    --out-file "$ACTIVE_WASM_FILE" >/dev/null 2>&1; then
+    log "ERROR: Rollback verification failed — could not read the active contract code."
+    log "   Expected WASM hash: $PREVIOUS_WASM_HASH"
+    exit 1
+  fi
+
+  ACTIVE_WASM_HASH=$(sha256sum "$ACTIVE_WASM_FILE" | awk '{print $1}')
+  if [ -z "$ACTIVE_WASM_HASH" ] || [ "$ACTIVE_WASM_HASH" != "$PREVIOUS_WASM_HASH" ]; then
+    log "ERROR: Rollback verification failed — the active WASM is not the previous WASM."
+    log "   Expected WASM hash: $PREVIOUS_WASM_HASH"
+    log "   Observed WASM hash: ${ACTIVE_WASM_HASH:-<none>}"
+    exit 1
+  fi
+
+  log "Active WASM hash matches the previous WASM: $ACTIVE_WASM_HASH"
+else
+  echo "[dry-run] soroban contract fetch --id $TARGET_CONTRACT_ID --network $NETWORK --out-file <tmp> && sha256sum <tmp>  # must equal $PREVIOUS_WASM_HASH"
 fi
 
 # ── Step 5: Replay verification ───────────────────────────────
@@ -151,6 +185,7 @@ log "── Rollback complete ──"
 log "Network:              $NETWORK"
 log "Contract:             $TARGET_CONTRACT_ID"
 log "Previous WASM hash:   $PREVIOUS_WASM_HASH"
+log "Active WASM hash:     ${ACTIVE_WASM_HASH:-not checked (dry run)}"
 log "────────────────────────────────────────"
 echo ""
 log "IMPORTANT: Re-run full verification suite against the rolled-back contract."

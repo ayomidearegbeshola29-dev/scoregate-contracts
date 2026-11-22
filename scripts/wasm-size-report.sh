@@ -4,6 +4,7 @@ set -euo pipefail
 TOP=10
 OUTPUT=""
 WASM_PATH="target/wasm32-unknown-unknown/release/scoregate_score.wasm"
+EXPLICIT_WASM=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,6 +18,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --wasm)
       WASM_PATH="$2"
+      EXPLICIT_WASM=true
       shift 2
       ;;
     -h|--help)
@@ -30,9 +32,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ ! -f "$WASM_PATH" ]]; then
+if [[ "$EXPLICIT_WASM" = true ]]; then
+  if [[ ! -f "$WASM_PATH" ]]; then
+    echo "Error: Explicit WASM binary not found at $WASM_PATH" >&2
+    exit 1
+  fi
+elif [[ ! -f "$WASM_PATH" ]]; then
   echo "WASM binary not found at $WASM_PATH. Building..."
   cargo build --target wasm32-unknown-unknown --release -p scoregate-score
+  if [[ ! -f "$WASM_PATH" ]]; then
+    echo "Error: Build succeeded but expected output not found at $WASM_PATH" >&2
+    exit 1
+  fi
 fi
 
 if ! command -v twiggy &> /dev/null; then

@@ -45,7 +45,7 @@ fn test_apply_param_change_cooldown_and_all_keys_emit_audit_event() {
     assert_eq!(client.get_upgrade_delay(), 259_200);
 
     // 4. cooldown
-    client.set_cooldown(&signers, &1_800);
+    client.propose_cooldown_change(&signers, &1_800);
     env.ledger().with_mut(|l| l.timestamp += 86_401);
     let key_cooldown = symbol_short!("cooldown");
     client.apply_param_change(&key_cooldown);

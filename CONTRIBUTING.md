@@ -13,19 +13,26 @@ Thanks for your interest in improving the ScoreGate on-chain risk score registry
 
 2. Build the contract:
    ```bash
-   cargo build --all
-   # WASM release build:
-   cargo build --target wasm32-unknown-unknown --release
+   # Native build of every workspace member (contracts and host tools):
+   cargo build --workspace
+   # WASM release build of the deployable contract only:
+   cargo build --target wasm32-unknown-unknown --release -p scoregate-score --locked
    ```
+   The workspace also holds host-only tools (`tools/replay`, `tools/recovery`,
+   `tools/schema-gen`, `tools/invocation-fuzzer`), the `tests/composability` suite, and test
+   fixtures (`mock-amm`, `mock-lending`, `scoregate-test-support`). They are built and tested
+   natively; do not pass them to the `wasm32-unknown-unknown` build. Always select the contract
+   with `-p`: a bare `cargo build --target wasm32-unknown-unknown --release` builds the whole
+   workspace for WASM, which includes those host-only members.
 
 3. Run the full test suite:
    ```bash
-   cargo test
+   cargo test --workspace
    ```
 
 4. Make a small change (e.g., fix a typo or add a doc example):
    - Edit files inside `contracts/scoregate-score/`
-   - Run `cargo test` to verify your change
+   - Run `cargo test --workspace` to verify your change
    - The four pre-PR checks (fmt, clippy, test, wasm build) are documented in the **[## Before Opening a Pull Request](#before-opening-a-pull-request)** section below.
 
 ## Opening an Issue
@@ -63,11 +70,19 @@ reviewers will hold your PR to.
 Run the same checks CI runs:
 
 ```bash
+# Native checks, for every workspace member
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test
-cargo build --target wasm32-unknown-unknown --release
+cargo test --workspace
+
+# Contract WASM build, for the deployable contract only (the command CI runs)
+cargo build --target wasm32-unknown-unknown --release -p scoregate-score --locked
 ```
+
+`scoregate-score` is the contract CI builds, sizes and publishes as a WASM artifact. Other
+workspace members are not release WASM targets in CI. If your change makes another contract
+crate deployable (for example `scoregate-aggregator`, which is also a `cdylib`), add it to CI
+explicitly with its own `-p <package>` build rather than widening this command.
 
 ## Guidelines
 

@@ -158,13 +158,14 @@ Soroban contract errors are returned as `u32` discriminant values. When a transa
 | Code | Name | Description | When returned | Client action |
 |-----:|------|-------------|---------------|---------------|
 | 4 | `BelowScoreFloor` | Alias for `InvalidScore`. Score is below the configured floor for a high-risk wallet | `submit_score` (hard fail) or `submit_scores_batch` (per-entry rejection) when the wallet's historical peak is at/above the high-water mark and the new score is below the floor value | The submission was blocked to prevent score-zeroing of a known high-risk wallet. If this is a legitimate re-scoring, the admin can call `override_score_floor` for a one-shot exception. |
+| 16 | `InvalidCorrelation` | Alias for `InvalidThreshold`. Static pair correlation is outside its domain | `set_pair_correlation` with `corr` below `-10_000` or above `10_000` | Use a coefficient scaled ×10 000 in `[-10_000, 10_000]`; the stored value is unchanged after a rejection. |
 | 16 | `InvalidScoreFloorPolicy` | Alias for `InvalidThreshold`. Floor policy parameters are invalid | `set_score_floor_policy` when `high_water_mark` is outside `[50, 100]`, or `floor_value >= high_water_mark` | Use `high_water_mark` in `[50, 100]` and `floor_value` strictly below it. |
 
 ### Hysteresis layer
 
 | Code | Name | Description | When returned | Client action |
 |-----:|------|-------------|---------------|---------------|
-| 49 | `InvalidHysteresisMargin` | Margin exceeds the maximum (50) | `set_hysteresis_margin` with `margin > MAX_HYSTERESIS_MARGIN` (50) | Use a value in `[0, 50]`. `0` disables hysteresis. |
+| 49 | `InvalidHysteresisMargin` | Margin exceeds the maximum (50), or a margin and a risk threshold that cannot be exited | `set_hysteresis_margin` with `margin > MAX_HYSTERESIS_MARGIN` (50) or `margin >= risk_threshold`; `set_risk_threshold`, `propose_policy_bundle`, `apply_param_change(risk_thr)` and `apply_policy_bundle` with a threshold that is not above a nonzero active margin | Use a value in `[0, 50]`. `0` disables hysteresis. |
 
 ### Multi-model consensus scoring
 

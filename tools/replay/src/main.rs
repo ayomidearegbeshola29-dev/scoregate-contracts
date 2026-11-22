@@ -15,6 +15,7 @@ use soroban_sdk::testutils::Ledger as _;
 use soroban_sdk::{Address, Env, Symbol, Vec as SVec};
 
 use scoregate_score::{ScoreGateScoreContract, ScoreGateScoreContractClient, ScoreSubmission};
+use replay::{run_config_drift, EXIT_USAGE};
 use schema::ReplayFileHeader;
 
 #[derive(Debug, Deserialize)]
@@ -425,12 +426,23 @@ fn main() -> Result<()> {
 
             run_failure_injection(&env, &client, &admin);
         }
+        "config-drift" => {
+            let status = match run_config_drift(args.get(2..).unwrap_or_default(), &mut std::io::stdout()) {
+                Ok(status) => status,
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    EXIT_USAGE
+                }
+            };
+            std::process::exit(status);
+        }
         _ => {
             eprintln!("Usage: replay <mode> [path]");
             eprintln!("  Modes:");
             eprintln!("    replay [path]               - Replay NDJSON snapshot (default: testdata/reference.ndjson)");
             eprintln!("    failure-inject [path]       - Run failure-injection scenarios");
-            std::process::exit(1);
+            eprintln!("    config-drift <approved> <observed> - Compare configuration manifests (see config-drift --help)");
+            std::process::exit(EXIT_USAGE);
         }
     }
     Ok(())

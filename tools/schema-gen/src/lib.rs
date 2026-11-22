@@ -405,6 +405,9 @@ fn typing_names() -> [&'static str; 6] {
 /// Convert a Soroban UDT struct spec entry into a Pydantic v2 model,
 /// preserving contract-spec (/XDR) field order (alphabetical, as the
 /// `#[contracttype]` derive emits).
+///
+/// A struct with no fields still yields valid Python: the class body is a bare `pass`, so the
+/// model has no fields (no placeholder is added) and serializes as an empty object.
 pub fn struct_to_python(struct_: &ScSpecUdtStructV0) -> String {
     let mut needs = Vec::new();
     let mut field_lines = Vec::new();
@@ -440,7 +443,11 @@ pub fn struct_to_python(struct_: &ScSpecUdtStructV0) -> String {
     lines.push(String::new());
     lines.push(format!("# JSON-Schema twin: {SCHEMA_FILE}"));
     lines.push(format!("class {}(BaseModel):", xdr_str(&struct_.name)));
-    lines.extend(field_lines);
+    if field_lines.is_empty() {
+        lines.push("    pass".to_string());
+    } else {
+        lines.extend(field_lines);
+    }
     let mut text = lines.join("\n");
     text.push('\n');
     text

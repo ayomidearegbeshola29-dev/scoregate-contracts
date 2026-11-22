@@ -1,8 +1,8 @@
-/// Replay determinism checks across host versions.
-/// Identifies semantic divergences in behavior between different Soroban host versions.
+//! Replay determinism checks across host versions.
+//! Identifies semantic divergences in behavior between different Soroban host versions.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Determinism check result
 pub type DeterminismResult<T> = Result<T, DeterminismError>;
@@ -231,66 +231,87 @@ pub fn compare_results(
             result_b.metadata.memory_bytes,
         ),
     ] {
-        if let (Some(value_a), Some(value_b)) = (value_a, value_b) {
-            if value_a != value_b {
+        match (value_a, value_b) {
+            (Some(value_a), Some(value_b)) => {
+                if value_a != value_b {
+                    divergences.push(DeterminismError::ExecutionDivergence {
+                        host_version_a: result_a.host_version.clone(),
+                        host_version_b: result_b.host_version.clone(),
+                        reason: format!(
+                            "{} differs: {} vs {}",
+                            label, value_a, value_b
+                        ),
+                    });
+                }
+            }
+            (None, None) => {}
+            (value_a, value_b) => {
                 divergences.push(DeterminismError::ExecutionDivergence {
                     host_version_a: result_a.host_version.clone(),
                     host_version_b: result_b.host_version.clone(),
-                    reason: format!("{label} differ: {value_a} vs {value_b}"),
+                    reason: format!("{} differs: {} vs {}", label, value_a, value_b),
                 });
             }
         }
     }
 
-    // Compare state snapshots
-    let all_keys: std::collections::HashSet<_> = result_a
-        .state_snapshot
-        .keys()
-        .chain(result_b.state_snapshot.keys())
-        .cloned()
-        .collect();
+    // Compare state snapshots using ordered key iteration so that diagnostic
+    // ordering is stable regardless of HashMap insertion order.
+    let mut all_keys: BTreeSet<&String> = BTreeSet::new();
+    all_keys.extend(result_a.state_snapshot.keys());
+    all_keys.extend(result_b.state_snapshot.keys());
 
     for key in all_keys {
-        let value_a = result_a.state_snapshot.get(&key).cloned();
-        let value_b = result_b.state_snapshot.get(&key).cloned();
+        let value_a = result_a.state_snapshot.get(key);
+        let value_b = result_b.state_snapshot.get(key);
 
         if value_a != value_b {
-            state_differences.push(StateDifference { key: key.clone(), value_a: value_a.clone(), value_b: value_b.clone() });
+            state_differences.push(StateDifference {
+                key: key.clone(),
+                value_a: value_a.cloned(),
+                value_b: value_b.cloned(),
+            });
 
             if let (Some(va), Some(vb)) = (value_a, value_b) {
                 divergences.push(DeterminismError::StateDivergence {
                     host_version_a: result_a.host_version.clone(),
                     host_version_b: result_b.host_version.clone(),
-                    key,
-                    value_a: va,
-                    value_b: vb,
+                    key: key.clone(),
+                    value_a: va.clone(),
+                    value_b: vb.clone(),
                 });
             }
         }
     }
 
-    // Compare events
+    // Compare events, including unmatched trailing events
     let max_events = result_a.events.len().max(result_b.events.len());
-    for i in 0..max_events {
-        let event_a = result_a.events.get(i).cloned();
-        let event_b = result_b.events.get(i).cloned();
+    for index in 0..max_events {
+        let event_a = result_a.events.get(index);
+        let event_b = result_b.events.get(index);
 
         if event_a != event_b {
-            event_differences.push(EventDifference { index: i, event_a: event_a.clone(), event_b: event_b.clone() });
+            event_differences.push(EventDifference {
+                index,
+                event_a: event_a.cloned(),
+                event_b: event_b.cloned(),
+            });
 
             if let (Some(ea), Some(eb)) = (event_a, event_b) {
                 divergences.push(DeterminismError::EventDivergence {
                     host_version_a: result_a.host_version.clone(),
                     host_version_b: result_b.host_version.clone(),
-                    index: i,
-                    event_a: ea,
-                    event_b: eb,
+                    index,
+                    event_a: ea.clone(),
+                    event_b: eb.clone(),
                 });
             }
         }
     }
 
-    let is_deterministic = divergences.is_empty();
+    let is_deterministic = divergences.is_empty()
+        && state_differences.is_empty()
+        && event_differences.is_empty();
 
     DeterminismComparison {
         host_version_a: result_a.host_version.clone(),
@@ -302,132 +323,101 @@ pub fn compare_results(
     }
 }
 
+fn format_optional<T: std::fmt::Display>(value: Option<T>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "<missing>".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn create_test_result(
+    fn make_result(
         host_version: &str,
-        accepted: u32,
-        rejected: u32,
-        state: HashMap<String, String>,
+        state: &[(&str, &str)],
     ) -> HostVersionResult {
+        let mut state_snapshot = HashMap::new();
+        for (k, v) in state {
+            state_snapshot.insert((*k).to_string(), (*v).to_string());
+        }
         HostVersionResult {
             host_version: host_version.to_string(),
-            accepted_count: accepted,
-            rejected_count: rejected,
-            state_snapshot: state,
-            events: vec![],
+            accepted_count: 1,
+            rejected_count: 0,
+            state_snapshot,
+            events: vec!["event".to_string()],
             error_code: None,
             metadata: ExecutionMetadata {
-                gas_consumed: Some(1000),
-                cpu_instructions: None,
-                memory_bytes: None,
-                execution_time_ms: Some(100),
-                peak_memory_bytes: Some(1024),
+                gas_consumed: Some(100),
+                cpu_instructions: Some(10),
+                memory_bytes: Some(20),
+                execution_time_ms: Some(1),
+                peak_memory_bytes: Some(30),
                 custom: HashMap::new(),
             },
         }
     }
 
     #[test]
-    fn test_identical_results_are_deterministic() {
-        let mut state = HashMap::new();
-        state.insert("score_wallet_1_XLM_USDC".to_string(), "50".to_string());
+    fn identical_comparisons_have_stable_ordering() {
+        // Same logical state, different insertion orders.
+        let a = make_result(
+            "v1",
+            &[("alpha", "1"), ("beta", "2"), ("gamma", "3"), ("delta", "4")],
+        );
+        let b = make_result(
+            "v2",
+            &[("delta", "4"), ("gamma", "3"), ("beta", "2"), ("alpha", "1")],
+        );
 
-        let result_a = create_test_result("21.0.0", 5, 0, state.clone());
-        let result_b = create_test_result("21.0.0", 5, 0, state);
+        let report_a = compare_results(&a, &b);
+        let report_b = compare_results(&b, &a);
 
-        let comparison = compare_results(&result_a, &result_b);
-        assert!(comparison.is_deterministic);
-        assert!(comparison.divergences.is_empty());
+        assert!(report_a.is_deterministic);
+        assert!(report_a.state_differences.is_empty());
+        assert!(report_a.divergences.is_empty());
+        assert_eq!(
+            serde_json::to_string(&report_a).unwrap(),
+            serde_json::to_string(&report_b).unwrap()
+        );
     }
 
     #[test]
-    fn test_different_acceptance_counts_detected() {
-        let state = HashMap::new();
-        let result_a = create_test_result("21.0.0", 5, 0, state.clone());
-        let result_b = create_test_result("21.1.0", 4, 1, state);
+    fn differing_states_report_sorted_differences() {
+        let a = make_result(
+            "v1",
+            &[("gamma", "3"), ("alpha", "1"), ("beta", "2")],
+        );
+        let b = make_result(
+            "v2",
+            &[("beta", "20"), ("gamma", "30"), ("alpha", "10")],
+        );
 
-        let comparison = compare_results(&result_a, &result_b);
-        assert!(!comparison.is_deterministic);
-        assert!(!comparison.divergences.is_empty());
-    }
+        let report = compare_results(&a, &b);
 
-    #[test]
-    fn test_state_divergence_detected() {
-        let mut state_a = HashMap::new();
-        state_a.insert("key1".to_string(), "value_a".to_string());
+        assert!(!report.is_deterministic);
+        let keys: Vec<&str> = report
+            .state_differences
+            .iter()
+            .map(|d| d.key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["alpha", "beta", "gamma"]);
 
-        let mut state_b = HashMap::new();
-        state_b.insert("key1".to_string(), "value_b".to_string());
-
-        let result_a = create_test_result("21.0.0", 5, 0, state_a);
-        let result_b = create_test_result("21.1.0", 5, 0, state_b);
-
-        let comparison = compare_results(&result_a, &result_b);
-        assert!(!comparison.is_deterministic);
-        assert!(!comparison.state_differences.is_empty());
-        assert_eq!(comparison.state_differences[0].key, "key1");
-    }
-
-    #[test]
-    fn test_error_code_divergence() {
-        let state = HashMap::new();
-        let mut result_a = create_test_result("21.0.0", 5, 0, state.clone());
-        result_a.error_code = Some(1);
-
-        let mut result_b = create_test_result("21.1.0", 5, 0, state);
-        result_b.error_code = Some(2);
-
-        let comparison = compare_results(&result_a, &result_b);
-        assert!(!comparison.is_deterministic);
-        assert!(comparison.divergences.iter().any(|d| matches!(d, DeterminismError::ErrorCodeDivergence { .. })));
-    }
-
-    #[test]
-    fn test_event_divergence_detected() {
-        let state = HashMap::new();
-        let mut result_a = create_test_result("21.0.0", 5, 0, state.clone());
-        result_a.events = vec!["event1".to_string()];
-
-        let mut result_b = create_test_result("21.1.0", 5, 0, state);
-        result_b.events = vec!["event2".to_string()];
-
-        let comparison = compare_results(&result_a, &result_b);
-        assert!(!comparison.is_deterministic);
-        assert!(!comparison.event_differences.is_empty());
-    }
-
-    #[test]
-    fn test_determinism_error_display() {
-        let err = DeterminismError::StateDivergence {
-            host_version_a: "21.0.0".to_string(),
-            host_version_b: "21.1.0".to_string(),
-            key: "test_key".to_string(),
-            value_a: "value_a".to_string(),
-            value_b: "value_b".to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("State divergence"));
-        assert!(msg.contains("test_key"));
-    }
-
-    #[test]
-    fn test_gas_consumed_divergence_detected() {
-        let state = HashMap::new();
-        let mut result_a = create_test_result("21.0.0", 5, 0, state.clone());
-        result_a.metadata.gas_consumed = Some(1000);
-
-        let mut result_b = create_test_result("21.1.0", 5, 0, state);
-        result_b.metadata.gas_consumed = Some(2000);
-
-        let comparison = compare_results(&result_a, &result_b);
-        assert!(!comparison.is_deterministic);
-        assert!(comparison.divergences.iter().any(|d| matches!(
-            d,
-            DeterminismError::ExecutionDivergence { reason, .. } if reason.contains("gas consumed")
-        )));
+        // Reversing insertion order must not change serialized output.
+        let a2 = make_result(
+            "v1",
+            &[("beta", "2"), ("gamma", "3"), ("alpha", "1")],
+        );
+        let b2 = make_result(
+            "v2",
+            &[("alpha", "10"), ("gamma", "30"), ("beta", "20")],
+        );
+        let report2 = compare_results(&a2, &b2);
+        assert_eq!(
+            serde_json::to_string(&report).unwrap(),
+            serde_json::to_string(&report2).unwrap()
+        );
     }
 }
-

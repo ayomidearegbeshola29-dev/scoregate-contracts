@@ -31,11 +31,36 @@ through the `replay` tool.
 ```bash
 cargo run -p replay --manifest-path tools/replay/Cargo.toml -- \
   config-drift approved.json observed.json
-```yaml
+```
+
+   `config-drift --template` prints an empty manifest with every field, and
+   `config-drift --help` prints the usage.
 
 4. Treat any `drift`, `missing_observed_field`, `unexpected_observed_field`,
    `unknown_approved_field`, or `unknown_observed_field` entry as an operator
    review item.
+
+## Report status and exit status
+
+Every mandatory field has to be present in both manifests with a real value:
+`paused` is a boolean and every other field is an unsigned integer (a JSON
+number, or a string of digits for values too large for a JSON number). `null`,
+which is what the template contains, is not an observation.
+
+| Report `status` | Meaning | Exit status |
+|---|---|---|
+| `ok` | Every field is present, valid and equal in both manifests | 0 |
+| `drifted` | The manifests are complete but a value differs, or a field is missing from one side | 1 |
+| `incomplete` | A field is missing from both manifests, or holds a `null` or wrongly typed value, so it was not verified | 1 |
+
+Two empty manifests are therefore `incomplete`, not `ok`: the extra entries
+`missing_in_both_manifests`, `null_approved_value`, `null_observed_value`,
+`invalid_approved_value` and `invalid_observed_value` say which field.
+
+A usage error (missing or extra arguments, an unknown option), a file that
+cannot be read and malformed JSON exit with status 2 and an error that names the
+path. An unknown subcommand is never treated as a replay path: it prints the usage
+and exits with status 2.
 
 ## Compatibility notes
 

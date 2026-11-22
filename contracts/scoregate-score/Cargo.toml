@@ -83,6 +83,26 @@ name = "estimate_unique_wallets"
 harness = false
 path = "benches/estimate_unique_wallets.rs"
 
+[[bench]]
+name = "entry_point_budgets"
+harness = false
+path = "benches/entry_point_budgets.rs"
+
+[[bench]]
+name = "get_score_histogram"
+harness = false
+path = "benches/get_score_histogram.rs"
+
+[[bench]]
+name = "get_interpolated_score"
+harness = false
+path = "benches/get_interpolated_score.rs"
+
+[[bench]]
+name = "query_risk_gate_relative"
+harness = false
+path = "benches/query_risk_gate_relative.rs"
+
 [features]
 testutils = ["soroban-sdk/testutils"]
 
@@ -102,4 +122,12 @@ crate-type = ["lib"]
 [[example]]
 name = "typed_client_examples"
 path = "../../examples/typed_client_examples.rs"
+crate-type = ["lib"]
+
+# Reference price-feed oracle adapter showing how an external oracle can
+# surface ScoreGate risk scores. Registered here so it is built by
+# `cargo build --examples -p scoregate-score` and listed in cargo metadata.
+[[example]]
+name = "oracle_adapter"
+path = "../../examples/oracle_adapter.rs"
 crate-type = ["lib"]

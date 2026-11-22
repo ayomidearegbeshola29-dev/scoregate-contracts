@@ -1,16 +1,27 @@
 //! Regression tests ensuring every Error variant is reachable from a test.
-//! This file serves as a coverage guard: if a new Error variant is added to errors.rs
-//! but no test exercises it, the build will fail with an error count mismatch.
+//!
+//! This is a coverage guard. Each variant of `Error` has exactly one `test_error_<variant>` function
+//! (the variant name in lower case) that asserts the call result `Err(Ok(Error::<Variant>))`.
+//! `test_every_error_variant_has_exactly_one_matching_test` compares the variants with those
+//! functions by name, so a new variant without a test, a duplicated test, a misnamed test, or a
+//! test that asserts a different variant all fail `cargo test`. `build.rs` runs a lighter name
+//! check so the mistake is also caught when building; it does not run any test.
 
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Ledger as _},
-    Address, Bytes, BytesN, Env, Vec,
+    token::StellarAssetClient,
+    Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 
 use crate::{
-    Error, ScoreGateScoreContract, ScoreGateScoreContractClient,
+    Error, ModelSubmission, ScoreAttestation, ScoreGateScoreContract, ScoreGateScoreContractClient,
 };
+
+/// Variants that no contract entry point returns yet, so no call can produce them. Their test pins
+/// the discriminant (`Error::<Variant> as u32`) instead of a call result. Remove a variant from this
+/// list, and give its test a call, as soon as the contract raises it.
+const RESERVED_VARIANTS: &[&str] = &["InvalidModelPriorWeight"];
 
 fn setup<'a>() -> (Env, ScoreGateScoreContractClient<'a>, Address, Address) {
     let env = Env::default();
@@ -24,6 +35,50 @@ fn setup<'a>() -> (Env, ScoreGateScoreContractClient<'a>, Address, Address) {
     let service = Address::generate(&env);
 
     (env, client, admin, service)
+}
+
+/// A contract with a real fee token, a funded reserve and a funded challenger, built the way
+/// `test_dispute.rs` builds its fixture. Returns the environment, the client and the challenger.
+fn dispute_setup<'a>() -> (Env, ScoreGateScoreContractClient<'a>, Address) {
+    let (env, client, admin, service) = setup();
+    client.initialize(&admin, &service);
+
+    let token = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    client.set_fee_token(&Vec::new(&env), &token);
+
+    let minter = StellarAssetClient::new(&env, &token);
+    minter.mint(&client.address, &1_000_000);
+    let challenger = Address::generate(&env);
+    minter.mint(&challenger, &1_000_000);
+
+    (env, client, challenger)
+}
+
+/// Commits to `bond` and a 16 byte salt of `salt_byte`, as the sealed-bid dispute flow requires, and
+/// returns the salt that opens the commitment.
+fn commit_dispute_bond(
+    env: &Env,
+    client: &ScoreGateScoreContractClient,
+    challenger: &Address,
+    pair: &Symbol,
+    bond: i128,
+    salt_byte: u8,
+) -> Bytes {
+    let mut commitment = Bytes::new(env);
+    commitment.extend_from_slice(&bond.to_le_bytes());
+    commitment.extend_from_slice(&[salt_byte; 16]);
+    let _ = client.try_commit_dispute_bond(challenger, challenger, pair, &commitment);
+    Bytes::from_array(env, &[salt_byte; 16])
+}
+
+/// A 2-of-2 admin quorum. Returns the two admin signers.
+fn admin_quorum(env: &Env, client: &ScoreGateScoreContractClient) -> (Address, Address) {
+    let signer_a = Address::generate(env);
+    let signer_b = Address::generate(env);
+    client.add_admin_signer(&Vec::new(env), &signer_a);
+    client.add_admin_signer(&Vec::new(env), &signer_b);
+    client.set_admin_threshold(&Vec::new(env), &2);
+    (signer_a, signer_b)
 }
 
 // ── Error::AlreadyInitialized (1) ──────────────────────────────────────────────
@@ -54,8 +109,13 @@ fn test_error_unauthorized() {
     let (env, client, admin, service) = setup();
     client.initialize(&admin, &service);
 
-    // Try to pause contract with unauthorized signer (multisig with empty vec requires actual signer)
-    let result = client.try_pause_contract(&Vec::new(&env));
+    // With a 2-of-2 admin quorum, naming the same signer twice is not a valid authorisation.
+    let (signer_a, _signer_b) = admin_quorum(&env, &client);
+    let mut duplicated = Vec::new(&env);
+    duplicated.push_back(signer_a.clone());
+    duplicated.push_back(signer_a);
+
+    let result = client.try_set_risk_threshold(&duplicated, &60);
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
@@ -133,7 +193,7 @@ fn test_error_contractpaused() {
     client.initialize(&admin, &service);
 
     // Pause the contract
-    client.pause_contract(&Vec::new(&env));
+    client.pause(&Vec::new(&env));
 
     let wallet = Address::generate(&env);
     let pair = symbol_short!("XLM_USDC");
@@ -211,9 +271,31 @@ fn test_error_arithmeticoverflow() {
     let (env, client, admin, service) = setup();
     client.initialize(&admin, &service);
 
-    // This error is typically internal; we trigger it by attempting to
-    // set an invalid decay rate numerator that causes overflow in decay calculations
-    let result = client.try_set_decay_rate(&Vec::new(&env), &1, &0);
+    let wallet = Address::generate(&env);
+
+    // Twenty pairs with the largest possible weight make the weighted sum overflow.
+    let pair_names = [
+        "P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "PA", "PB", "PC", "PD", "PE",
+        "PF", "PG", "PH", "PI", "PJ",
+    ];
+    for (i, name) in pair_names.iter().enumerate() {
+        let pair = Symbol::new(&env, name);
+        client.set_pair_weight(&Vec::new(&env), &pair, &u32::MAX);
+        client.submit_score(
+            &Vec::new(&env),
+            &wallet,
+            &pair,
+            &50,
+            &false,
+            &false,
+            &(i as u64 + 1),
+            &90,
+            &1,
+            &None,
+        );
+    }
+
+    let result = client.try_get_aggregate_score(&wallet);
     assert_eq!(result, Err(Ok(Error::ArithmeticOverflow)));
 }
 
@@ -252,15 +334,33 @@ fn test_error_insufficientsigners() {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
     client.initialize(&admin, &service);
 
-    // Set admin multisig threshold to 2
-    client.set_admin_multisig_threshold(&Vec::new(&env), &2);
+    // A 2-of-3 service quorum
+    let mut signers = Vec::new(&env);
+    for _ in 0..3 {
+        let signer = Address::generate(&env);
+        client.add_service_signer(&Vec::new(&env), &signer);
+        signers.push_back(signer);
+    }
+    client.set_service_threshold(&Vec::new(&env), &2);
 
     // Try with only 1 signer when 2 are required
-    let signer1 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(signer1);
+    let mut one = Vec::new(&env);
+    one.push_back(signers.get(0).unwrap());
 
-    let result = client.try_set_cooldown(&signers, &3600);
+    let wallet = Address::generate(&env);
+    let pair = symbol_short!("XLM_USDC");
+    let result = client.try_submit_score(
+        &one,
+        &wallet,
+        &pair,
+        &55,
+        &false,
+        &false,
+        &100_000,
+        &80,
+        &1,
+        &None,
+    );
     assert_eq!(result, Err(Ok(Error::InsufficientSigners)));
 }
 
@@ -292,7 +392,7 @@ fn test_error_invalidthreshold() {
     client.initialize(&admin, &service);
 
     // Try to set service threshold to 0 (must be >= 1)
-    let result = client.try_set_service_multisig_threshold(&Vec::new(&env), &0);
+    let result = client.try_set_service_threshold(&Vec::new(&env), &0);
     assert_eq!(result, Err(Ok(Error::InvalidThreshold)));
 }
 
@@ -505,30 +605,21 @@ fn test_error_invalidattestation() {
     let (env, client, admin, service) = setup();
     client.initialize(&admin, &service);
 
-    // Set a service pubkey
-    let pubkey = Bytes::from_array(&env, &[1u8; 32]);
-    client.set_service_pubkey(&pubkey);
-
     let wallet = Address::generate(&env);
-    let pair = symbol_short!("XLM_USDC");
 
-    // Create an invalid attestation (wrong signature)
-    let attestation = crate::ScoreAttestation {
-        message_hash: BytesN::from_array(&env, &[0u8; 32]),
-        signature: Bytes::from_array(&env, &[0u8; 64]),
-    };
-
+    // An asset pair longer than the supported length is rejected as an invalid attestation input.
+    let oversized_pair = Symbol::new(&env, "PAIR123456");
     let result = client.try_submit_score(
         &Vec::new(&env),
         &wallet,
-        &pair,
-        &50,
+        &oversized_pair,
+        &42,
         &false,
         &false,
-        &100_000,
-        &80,
         &1,
-        &Some(attestation),
+        &90,
+        &1,
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidAttestation)));
 }
@@ -540,9 +631,9 @@ fn test_error_invalidpubkeylength() {
     let (env, client, admin, service) = setup();
     client.initialize(&admin, &service);
 
-    // Try to set a pubkey with invalid length
-    let invalid_pubkey = Bytes::from_array(&env, &[1u8; 31]); // Too short
-    let result = client.try_set_service_pubkey(&invalid_pubkey);
+    // A compressed secp256k1 public key is 33 bytes; 32 is the wrong length
+    let invalid_pubkey = Bytes::from_array(&env, &[1u8; 32]);
+    let result = client.try_set_service_pubkey(&Vec::new(&env), &invalid_pubkey);
     assert_eq!(result, Err(Ok(Error::InvalidPubkeyLength)));
 }
 
@@ -563,18 +654,32 @@ fn test_error_invalidhistorydepth() {
 #[test]
 fn test_error_insufficientconsensus() {
     let (env, client, admin, service) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
     client.initialize(&admin, &service);
 
     let wallet = Address::generate(&env);
     let pair = symbol_short!("XLM_USDC");
 
-    // Create a consensus input with scores that don't agree
-    let mut scores = Vec::new(&env);
-    scores.push_back(10);
-    scores.push_back(90);
+    // The only submission has an out-of-range score, so no submission counts towards consensus.
+    let mut submissions = Vec::new(&env);
+    submissions.push_back(ModelSubmission {
+        model_version: 1,
+        model: Address::generate(&env),
+        score: 101,
+        confidence: 80,
+        benford_flag: false,
+        ml_flag: false,
+        attestation: ScoreAttestation {
+            commitment: BytesN::from_array(&env, &[0u8; 32]),
+            signature: BytesN::from_array(&env, &[0u8; 65]),
+            contract_id: BytesN::from_array(&env, &[0u8; 32]),
+            contract_version: 0,
+            nonce: 0,
+        },
+    });
 
-    // Try to submit consensus with scores too far apart
-    let result = client.try_submit_consensus(&Vec::new(&env), &wallet, &pair, &scores);
+    let result =
+        client.try_submit_consensus_score(&Vec::new(&env), &wallet, &pair, &submissions, &100_000);
     assert_eq!(result, Err(Ok(Error::InsufficientConsensus)));
 }
 
@@ -583,13 +688,15 @@ fn test_error_insufficientconsensus() {
 #[test]
 fn test_error_consensusinputempty() {
     let (env, client, admin, service) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
     client.initialize(&admin, &service);
 
     let wallet = Address::generate(&env);
     let pair = symbol_short!("XLM_USDC");
 
-    let empty_scores = Vec::new(&env);
-    let result = client.try_submit_consensus(&Vec::new(&env), &wallet, &pair, &empty_scores);
+    let empty = Vec::<ModelSubmission>::new(&env);
+    let result =
+        client.try_submit_consensus_score(&Vec::new(&env), &wallet, &pair, &empty, &100_000);
     assert_eq!(result, Err(Ok(Error::ConsensusInputEmpty)));
 }
 
@@ -597,11 +704,11 @@ fn test_error_consensusinputempty() {
 
 #[test]
 fn test_error_invalidconsensusconfig() {
-    let (env, client, admin, service) = setup();
+    let (_env, client, admin, service) = setup();
     client.initialize(&admin, &service);
 
     // Try to set invalid consensus config (k=0 is invalid)
-    let result = client.try_set_consensus_config(&Vec::new(&env), &0, &5);
+    let result = client.try_set_consensus_config(&0, &5);
     assert_eq!(result, Err(Ok(Error::InvalidConsensusConfig)));
 }
 
@@ -642,21 +749,14 @@ fn test_error_adminsignernotinset() {
 #[test]
 fn test_error_insufficientadminsigners() {
     let (env, client, admin, service) = setup();
-    env.ledger().with_mut(|l| l.timestamp = 100_000);
     client.initialize(&admin, &service);
 
-    // Set admin multisig threshold to 2
-    client.set_admin_multisig_threshold(&Vec::new(&env), &2);
+    // With a 2-of-2 admin quorum, one signer is not enough.
+    let (signer_a, _signer_b) = admin_quorum(&env, &client);
+    let mut one = Vec::new(&env);
+    one.push_back(signer_a);
 
-    // Try to execute with only 1 signer when 2 are required
-    let hash = BytesN::from_array(&env, &[1u8; 32]);
-    client.propose_upgrade(&Vec::new(&env), &hash);
-
-    let signer1 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(signer1);
-
-    let result = client.try_execute_upgrade(&signers);
+    let result = client.try_pause(&one);
     assert_eq!(result, Err(Ok(Error::InsufficientAdminSigners)));
 }
 
@@ -671,10 +771,10 @@ fn test_error_cyclicdelegation() {
     let wallet_b = Address::generate(&env);
 
     // Delegate A to B
-    client.set_wallet_delegate(&wallet_a, &wallet_b);
+    client.set_score_delegate(&wallet_a, &wallet_b);
 
     // Try to delegate B to A (creates cycle)
-    let result = client.try_set_wallet_delegate(&wallet_b, &wallet_a);
+    let result = client.try_set_score_delegate(&wallet_b, &wallet_a);
     assert_eq!(result, Err(Ok(Error::CyclicDelegation)));
 }
 
@@ -687,8 +787,8 @@ fn test_error_scoreembargoed() {
 
     let wallet = Address::generate(&env);
 
-    // Set embargo on the wallet
-    client.embargo_wallet(&Vec::new(&env), &wallet, &None);
+    // Set an embargo on the wallet with no expiry
+    client.set_score_embargo(&wallet, &None);
 
     // Try to get score for embargoed wallet
     let pair = symbol_short!("XLM_USDC");
@@ -704,23 +804,11 @@ fn test_error_feetokennotset() {
     client.initialize(&admin, &service);
 
     let wallet = Address::generate(&env);
-
-    // Try to open a dispute when fee token is not set
     let pair = symbol_short!("XLM_USDC");
-    client.submit_score(
-        &Vec::new(&env),
-        &wallet,
-        &pair,
-        &50,
-        &false,
-        &false,
-        &100_000,
-        &80,
-        &1,
-        &None,
-    );
 
-    let result = client.try_open_score_dispute(&wallet, &pair, &100);
+    // Try to open a dispute when no fee token is configured
+    let salt = commit_dispute_bond(&env, &client, &wallet, &pair, 10_000, 1);
+    let result = client.try_open_score_dispute(&wallet, &wallet, &pair, &10_000, &salt);
     assert_eq!(result, Err(Ok(Error::FeeTokenNotSet)));
 }
 
@@ -732,70 +820,48 @@ fn test_error_quorumfailurewindownotelapsed() {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
     client.initialize(&admin, &service);
 
-    // Simulate quorum failure by trying to reset it immediately
-    // This error is complex; we verify it exists by attempting an operation
-    // that would normally trigger it in multi-signer scenarios
-    let result = client.try_clear_quorum_failure_state(&Vec::new(&env));
-    // This may or may not return the error depending on state; we just verify the error is reachable
-    let _ = result;
+    // The variant is returned as `ParameterProposalVetoPeriodEnded`: a parameter change can be
+    // vetoed only during the first half of its time lock.
+    let value = Bytes::from_array(&env, &crate::constants::MIN_COOLDOWN_SECS.to_be_bytes());
+    let proposal_id = client.propose_parameter_change(
+        &Vec::from_array(&env, [admin.clone()]),
+        &crate::parameter_governance::param_key_cooldown(),
+        &value,
+    );
+
+    let veto_deadline = 100_000 + crate::constants::DEFAULT_UPGRADE_DELAY_SECS / 2;
+    env.ledger().with_mut(|l| l.timestamp = veto_deadline + 1);
+
+    let result =
+        client.try_veto_parameter_change(&Vec::from_array(&env, [service.clone()]), &proposal_id);
+    assert_eq!(result, Err(Ok(Error::QuorumFailureWindowNotElapsed)));
 }
 
 // ── Error::RevealWindowExpired (40) ────────────────────────────────────────────
 
 #[test]
 fn test_error_revealwindowexpired() {
-    let (env, client, admin, service) = setup();
-    env.ledger().with_mut(|l| l.timestamp = 100_000);
-    client.initialize(&admin, &service);
-
-    let wallet = Address::generate(&env);
+    let (env, client, challenger) = dispute_setup();
     let pair = symbol_short!("XLM_USDC");
 
-    // Set finality buffer to enable pending scores
-    client.set_finality_buffer(&Vec::new(&env), &300);
-
-    // Submit a score (goes to pending)
-    client.submit_score(
-        &Vec::new(&env),
-        &wallet,
-        &pair,
-        &50,
-        &false,
-        &false,
-        &100_000,
-        &80,
-        &1,
-        &None,
-    );
-
-    // Advance time past the reveal window
-    env.ledger().with_mut(|l| l.timestamp = 100_000 + 400);
-
-    // Try to reveal the pending score (reveal window has expired)
-    let result = client.try_reveal_consensus(&Vec::new(&env), &wallet, &pair, &50, &BytesN::from_array(&env, &[0u8; 32]));
+    // Revealing a bond that was never committed (or whose commitment has lapsed)
+    let salt = Bytes::from_array(&env, &[1u8; 16]);
+    let result = client.try_open_score_dispute(&challenger, &challenger, &pair, &10_000, &salt);
     assert_eq!(result, Err(Ok(Error::RevealWindowExpired)));
 }
 
 // ── Error::CommitmentMismatch (41) ─────────────────────────────────────────────
 
 #[test]
-fn test_error_commitmenmismatch() {
-    let (env, client, admin, service) = setup();
-    env.ledger().with_mut(|l| l.timestamp = 100_000);
-    client.initialize(&admin, &service);
-
-    let wallet = Address::generate(&env);
+fn test_error_commitmentmismatch() {
+    let (env, client, challenger) = dispute_setup();
     let pair = symbol_short!("XLM_USDC");
 
-    // Commit a score
-    let commitment = BytesN::from_array(&env, &[1u8; 32]);
-    client.commit_pending_score(&Vec::new(&env), &wallet, &pair, &commitment);
+    // Commit to one salt, then reveal with another
+    commit_dispute_bond(&env, &client, &challenger, &pair, 10_000, 1);
+    let wrong_salt = Bytes::from_array(&env, &[2u8; 16]);
 
-    // Try to reveal with wrong salt/score combination
-    let wrong_salt = BytesN::from_array(&env, &[0u8; 32]);
-    env.ledger().with_mut(|l| l.timestamp = 100_000 + 300);
-
-    let result = client.try_reveal_consensus(&Vec::new(&env), &wallet, &pair, &75, &wrong_salt);
+    let result = client.try_open_score_dispute(&challenger, &challenger, &pair, &10_000, &wrong_salt);
     assert_eq!(result, Err(Ok(Error::CommitmentMismatch)));
 }
 
@@ -822,8 +888,7 @@ fn test_error_nopendingscore() {
     let pair = symbol_short!("XLM_USDC");
 
     // Try to commit a pending score that doesn't exist
-    let commitment = BytesN::from_array(&env, &[1u8; 32]);
-    let result = client.try_commit_pending_score(&Vec::new(&env), &wallet, &pair, &commitment);
+    let result = client.try_commit_pending_score(&wallet, &pair);
     assert_eq!(result, Err(Ok(Error::NoPendingScore)));
 }
 
@@ -856,8 +921,7 @@ fn test_error_finalitywindownotelapsed() {
     );
 
     // Try to commit immediately (before finality window has passed)
-    let commitment = BytesN::from_array(&env, &[1u8; 32]);
-    let result = client.try_commit_pending_score(&Vec::new(&env), &wallet, &pair, &commitment);
+    let result = client.try_commit_pending_score(&wallet, &pair);
     assert_eq!(result, Err(Ok(Error::FinalityWindowNotElapsed)));
 }
 
@@ -865,32 +929,12 @@ fn test_error_finalitywindownotelapsed() {
 
 #[test]
 fn test_error_invaliddisputebond() {
-    let (env, client, admin, service) = setup();
-    client.initialize(&admin, &service);
-
-    let wallet = Address::generate(&env);
+    let (env, client, challenger) = dispute_setup();
     let pair = symbol_short!("XLM_USDC");
 
-    // Set fee token first
-    let fee_token = Address::generate(&env);
-    client.set_fee_token(&Vec::new(&env), &fee_token);
-
-    // Submit a score
-    client.submit_score(
-        &Vec::new(&env),
-        &wallet,
-        &pair,
-        &50,
-        &false,
-        &false,
-        &100_000,
-        &80,
-        &1,
-        &None,
-    );
-
-    // Try to open dispute with 0 bond (invalid)
-    let result = client.try_open_score_dispute(&wallet, &pair, &0);
+    // A bond of 0 is invalid
+    let salt = commit_dispute_bond(&env, &client, &challenger, &pair, 0, 1);
+    let result = client.try_open_score_dispute(&challenger, &challenger, &pair, &0, &salt);
     assert_eq!(result, Err(Ok(Error::InvalidDisputeBond)));
 }
 
@@ -898,35 +942,16 @@ fn test_error_invaliddisputebond() {
 
 #[test]
 fn test_error_disputealreadyopen() {
-    let (env, client, admin, service) = setup();
-    client.initialize(&admin, &service);
-
-    let wallet = Address::generate(&env);
+    let (env, client, challenger) = dispute_setup();
     let pair = symbol_short!("XLM_USDC");
 
-    // Set fee token
-    let fee_token = Address::generate(&env);
-    client.set_fee_token(&Vec::new(&env), &fee_token);
-
-    // Submit a score
-    client.submit_score(
-        &Vec::new(&env),
-        &wallet,
-        &pair,
-        &50,
-        &false,
-        &false,
-        &100_000,
-        &80,
-        &1,
-        &None,
-    );
-
     // Open a dispute
-    client.open_score_dispute(&wallet, &pair, &100);
+    let salt = commit_dispute_bond(&env, &client, &challenger, &pair, 10_000, 1);
+    client.open_score_dispute(&challenger, &challenger, &pair, &10_000, &salt);
 
     // Try to open another dispute on the same pair
-    let result = client.try_open_score_dispute(&wallet, &pair, &100);
+    let salt = commit_dispute_bond(&env, &client, &challenger, &pair, 10_000, 1);
+    let result = client.try_open_score_dispute(&challenger, &challenger, &pair, &10_000, &salt);
     assert_eq!(result, Err(Ok(Error::DisputeAlreadyOpen)));
 }
 
@@ -948,37 +973,16 @@ fn test_error_disputenotfound() {
 // ── Error::DisputeNotYetTimedOut (48) ──────────────────────────────────────────
 
 #[test]
-fn test_error_disputenottimedout() {
-    let (env, client, admin, service) = setup();
-    env.ledger().with_mut(|l| l.timestamp = 100_000);
-    client.initialize(&admin, &service);
-
-    let wallet = Address::generate(&env);
+fn test_error_disputenotyettimedout() {
+    let (env, client, challenger) = dispute_setup();
     let pair = symbol_short!("XLM_USDC");
 
-    // Set fee token
-    let fee_token = Address::generate(&env);
-    client.set_fee_token(&Vec::new(&env), &fee_token);
-
-    // Submit a score
-    client.submit_score(
-        &Vec::new(&env),
-        &wallet,
-        &pair,
-        &50,
-        &false,
-        &false,
-        &100_000,
-        &80,
-        &1,
-        &None,
-    );
-
     // Open a dispute
-    client.open_score_dispute(&wallet, &pair, &100);
+    let salt = commit_dispute_bond(&env, &client, &challenger, &pair, 10_000, 1);
+    client.open_score_dispute(&challenger, &challenger, &pair, &10_000, &salt);
 
     // Try to settle by timeout before the deadline
-    let result = client.try_resolve_dispute_timeout(&Vec::new(&env), &wallet, &pair);
+    let result = client.try_resolve_dispute_timeout(&challenger, &pair);
     assert_eq!(result, Err(Ok(Error::DisputeNotYetTimedOut)));
 }
 
@@ -986,11 +990,11 @@ fn test_error_disputenottimedout() {
 
 #[test]
 fn test_error_invalidhysteresismargin() {
-    let (env, client, admin, service) = setup();
+    let (_env, client, admin, service) = setup();
     client.initialize(&admin, &service);
 
     // Try to set hysteresis margin above MAX (50)
-    let result = client.try_set_hysteresis_margin(&Vec::new(&env), &51);
+    let result = client.try_set_hysteresis_margin(&51);
     assert_eq!(result, Err(Ok(Error::InvalidHysteresisMargin)));
 }
 
@@ -1086,10 +1090,103 @@ fn test_errors_md_lock_against_discriminants() {
 
 #[test]
 fn test_error_invalidmodelpriorweight() {
-    let (env, client, admin, service) = setup();
-    client.initialize(&admin, &service);
+    // Reserved: no contract entry point returns this variant yet (see `RESERVED_VARIANTS`), so
+    // there is no call to assert. Pin the discriminant so the code is not renumbered silently.
+    assert_eq!(Error::InvalidModelPriorWeight as u32, 50);
+}
 
-    // Try to set model prior weight to 0 (must be > 0)
-    let result = client.try_set_model_prior_weight(&Vec::new(&env), &0);
-    assert_eq!(result, Err(Ok(Error::InvalidModelPriorWeight)));
+// ── Coverage guard ─────────────────────────────────────────────────────────────
+
+/// Every variant of `Error` must have exactly one `test_error_<variant>` function, and that function
+/// must assert the variant itself. Counting tests is not enough: two tests for one variant keep the
+/// totals equal while leaving another variant unchecked.
+#[test]
+fn test_every_error_variant_has_exactly_one_matching_test() {
+    let errors_rs = include_str!("errors.rs");
+    let this_file = include_str!("error_coverage.rs");
+
+    // Every variant of `Error`, in declaration order.
+    let mut variants: std::vec::Vec<&str> = std::vec::Vec::new();
+    let mut in_enum = false;
+    for line in errors_rs.lines() {
+        let line = line.trim();
+        if line.starts_with("pub enum Error {") {
+            in_enum = true;
+            continue;
+        }
+        if !in_enum {
+            continue;
+        }
+        if line.starts_with('}') {
+            break;
+        }
+        if let Some((name, discriminant)) = line.split_once('=') {
+            if discriminant.trim().trim_end_matches(',').parse::<u32>().is_ok() {
+                variants.push(name.trim());
+            }
+        }
+    }
+    assert!(!variants.is_empty(), "no Error variants found in errors.rs");
+
+    // Every `test_error_*` function in this file with its body. Test functions start in column 0
+    // and end at the next line that is a lone closing brace.
+    let mut tests: std::vec::Vec<(std::string::String, std::string::String)> = std::vec::Vec::new();
+    let mut current: Option<usize> = None;
+    for line in this_file.lines() {
+        if let Some(rest) = line.strip_prefix("fn test_error_") {
+            let name = rest.split('(').next().unwrap_or("");
+            tests.push((std::format!("test_error_{}", name), std::string::String::new()));
+            current = Some(tests.len() - 1);
+            continue;
+        }
+        if let Some(index) = current {
+            if line == "}" {
+                current = None;
+            } else {
+                tests[index].1.push_str(line);
+                tests[index].1.push('\n');
+            }
+        }
+    }
+
+    let mut problems: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+
+    for variant in &variants {
+        let expected_name = std::format!("test_error_{}", variant.to_lowercase());
+        let matching: std::vec::Vec<&(std::string::String, std::string::String)> =
+            tests.iter().filter(|(name, _)| *name == expected_name).collect();
+        if matching.len() != 1 {
+            problems.push(std::format!(
+                "Error::{}: expected one test named {}, found {}",
+                variant,
+                expected_name,
+                matching.len()
+            ));
+            continue;
+        }
+
+        let needle = if RESERVED_VARIANTS.contains(variant) {
+            std::format!("Error::{} as u32", variant)
+        } else {
+            std::format!("Err(Ok(Error::{}))", variant)
+        };
+        if !matching[0].1.contains(&needle) {
+            problems.push(std::format!("{} does not assert `{}`", expected_name, needle));
+        }
+    }
+
+    // A test that matches no variant is a typo or a left-over from a removed variant.
+    for (name, _) in &tests {
+        if !variants.iter().any(|variant| std::format!("test_error_{}", variant.to_lowercase()) == *name) {
+            problems.push(std::format!("{} does not match any Error variant", name));
+        }
+    }
+
+    for reserved in RESERVED_VARIANTS {
+        if !variants.contains(reserved) {
+            problems.push(std::format!("RESERVED_VARIANTS lists {}, which is not an Error variant", reserved));
+        }
+    }
+
+    assert!(problems.is_empty(), "error coverage problems:\n{}", problems.join("\n"));
 }

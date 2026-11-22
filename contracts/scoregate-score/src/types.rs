@@ -220,6 +220,11 @@ pub struct ScoreAttestationInput {
 ///
 /// Canonical definition — includes both the compact form (`submission_count`,
 /// `score_sum`) and the summary form (`total_submissions`, `average_score`).
+///
+/// The counters are the record; the summary is derived from them, so both forms always describe
+/// the same observations: `total_submissions == submission_count` and `average_score` is
+/// `score_sum / submission_count` rounded down (0 before the first score). Records stored before
+/// the summary was filled in are corrected when read.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelVersionStats {

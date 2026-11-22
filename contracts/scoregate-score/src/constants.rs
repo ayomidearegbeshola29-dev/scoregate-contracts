@@ -126,6 +126,11 @@ pub const DEFAULT_SCORE_FLOOR_MIN: u32 = 20;
 pub const MIN_SCORE_FLOOR_HWM: u32 = 50;
 pub const MAX_SCORE_FLOOR_HWM: u32 = 100;
 pub const MAX_HYSTERESIS_MARGIN: u32 = 50;
+
+/// Bounds of a static pair correlation coefficient, scaled ×10 000 (so `-10_000` is ρ = -1 and
+/// `10_000` is ρ = 1). Both bounds are valid values.
+pub const MIN_PAIR_CORRELATION: i32 = -10_000;
+pub const MAX_PAIR_CORRELATION: i32 = 10_000;
 pub const BAND_STATE_TTL_THRESHOLD: u32 = 518_400;
 pub const BAND_STATE_TTL_EXTEND_TO: u32 = 777_600;
 pub const EMBARGO_TTL_THRESHOLD: u32 = 1_555_200;
@@ -175,66 +180,15 @@ pub const DEFAULT_DISPUTE_REVEAL_WINDOW_SECS: u64 = 600;
 /// Maximum finality buffer duration — 24 hours.
 pub const MAX_FINALITY_BUFFER_SECS: u64 = 86_400;
 
-/// Default heartbeat alert threshold — 1 hour.
-pub const DEFAULT_HEARTBEAT_ALERT_THRESHOLD_SECS: u64 = 3_600;
+// ── Cluster membership ────────────────────────────────────────────────────────
 
-// ── HyperLogLog unique-wallet estimation ─────────────────────────────────────
+/// Number of score buckets used to partition wallets into clusters.
+///
+/// A wallet's cluster is derived from its score via
+/// `score / CLUSTER_BUCKET_WIDTH`, so scores `0..=9` map to cluster `0`,
+/// `10..=19` to cluster `1`, and so on up to `100` (cluster `10`).
+/// Assignment and membership enumeration must both use this same definition.
+pub const CLUSTER_BUCKET_WIDTH: u32 = 10;
 
-/// Minimum allowed HLL precision (2^4 = 16 registers).
-pub const HLL_MIN_PRECISION: u32 = 4;
-/// Maximum allowed HLL precision (2^16 = 65536 registers).
-pub const HLL_MAX_PRECISION: u32 = 16;
-/// Default HLL precision until the admin configures one explicitly.
-pub const HLL_DEFAULT_PRECISION: u32 = 8;
-
-// ── Quorum reduction ──────────────────────────────────────────────────────────
-
-// ── Quorum / consensus ────────────────────────────────────────────────────────
-
-/// Default window (seconds) for which a quorum-failure is considered recent.
-/// After this window the failure state is cleared automatically.
-pub const DEFAULT_QUORUM_FAILURE_WINDOW_SECS: u64 = 86_400; // 24 hours
-
-pub const MAX_TRACKED_SCORE_ENTRIES: u32 = 500;
-pub const SCORE_ENTRY_INDEX_BUCKETS: u32 = 16;
-pub const MAX_EXPIRING_ENTRIES_PER_CALL: u32 = 100;
-
-/// Maximum number of concurrently pending parameter-change proposals.
-pub const MAX_PENDING_PARAMETER_PROPOSALS: u32 = 10;
-
-/// Maximum number of parameter proposal IDs retained in the historical proposal index.
-pub const MAX_PARAMETER_PROPOSAL_HISTORY: u32 = 100;
-
-/// Time-lock delay before a pending simple parameter change may be applied.
-pub const DEFAULT_PARAM_CHANGE_DELAY_SECS: u64 = 86_400;
-
-/// Maximum number of entries retained in the rate-limit override audit log.
-pub const MAX_RATE_LIMIT_OVERRIDE_LOG: u32 = 100;
-
-/// Sanity ceiling on the per-call score boost `propagate_contagion` may
-/// apply to a counterparty. Bounds how much damage a single authorized call
-/// can do even under a compromised/misbehaving admin signer set. (Issue #55)
-pub const MAX_CONTAGION_BOOST: u32 = 50;
-
-/// Operator-facing manifest fields that the drift checker treats as the
-/// stable configuration surface for deployed instances.
-pub const CONFIG_DRIFT_MANIFEST_FIELDS: &[&str] = &[
-    "contract_version",
-    "paused",
-    "risk_threshold",
-    "jump_threshold",
-    "staleness_window",
-    "upgrade_delay",
-    "cooldown",
-    "service_threshold",
-    "admin_threshold",
-    "consensus_threshold_k",
-    "consensus_epsilon",
-    "reveal_window",
-    "finality_buffer",
-    "heartbeat_alert_threshold",
-    "oracle_staleness_threshold",
-];
-
-/// Nonce exhaustion warning threshold: emit alert event when nonce exceeds this threshold.
-pub const NONCE_EXHAUSTION_WARNING_THRESHOLD: u64 = u64::MAX - 10_000;
+/// Maximum number of members returned by a single `get_cluster_members` call.
+pub const MAX_CLUSTER_MEMBERS: u32 = 200;

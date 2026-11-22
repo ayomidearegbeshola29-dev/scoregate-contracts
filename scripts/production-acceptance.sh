@@ -4,6 +4,9 @@
 # Usage:
 #   scripts/production-acceptance.sh [--output docs/reports/production-readiness-report.md]
 #
+# The report names the repository that was tested: READY_REPOSITORY (owner/repo) when set,
+# otherwise the owner/repo of the `origin` remote, otherwise "unknown (no usable origin remote)".
+#
 # The script is intentionally local-network agnostic. Live testnet canary drills
 # are handled by scripts/testnet-canary-rehearsal.sh and their report path is
 # referenced from the readiness report.
@@ -18,7 +21,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,14p' "$0"
+      sed -n '2,17p' "$0"
       exit 0
       ;;
     *)
@@ -49,6 +52,42 @@ for required in cargo sha256sum wc; do
     exit 127
   fi
 done
+
+# Prints the owner/repo to record in the report: the validated READY_REPOSITORY override, else
+# the repository behind the `origin` remote (so a fork reports itself), else an explicit unknown.
+# Only owner/repo is printed, never the remote URL, which may carry credentials.
+repository_identity() {
+  local explicit="${READY_REPOSITORY:-}" url path
+  local valid='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+  local url_form='^(https?|ssh|git)://([^@/]+@)?[^/:]+(:[0-9]+)?/(.+)$'
+  local scp_form='^[^@/]+@[^:/]+:(.+)$'
+
+  if [[ -n "$explicit" ]]; then
+    if [[ "$explicit" =~ $valid ]]; then
+      echo "$explicit"
+      return 0
+    fi
+    echo "READY_REPOSITORY must look like owner/repo" >&2
+    return 1
+  fi
+
+  url="$(git remote get-url origin 2>/dev/null || true)"
+  path=""
+  if [[ "$url" =~ $url_form ]]; then
+    path="${BASH_REMATCH[4]}"
+  elif [[ "$url" =~ $scp_form ]]; then
+    path="${BASH_REMATCH[1]}"
+  fi
+  path="${path%/}"
+  path="${path%.git}"
+  if [[ "$path" =~ $valid ]]; then
+    echo "$path"
+  else
+    echo "unknown (no usable origin remote)"
+  fi
+}
+
+REPOSITORY="$(repository_identity)" || exit 1
 
 publish_partial_report() {
   if [[ -f "$REPORT_TMP" ]]; then
@@ -95,7 +134,7 @@ run_step() {
   echo ""
   echo "Run ID: $RUN_ID"
   echo "Generated UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "Repository: Ledger-Lenz/scoregate-contract"
+  echo "Repository: $REPOSITORY"
   echo "Commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
   echo "Operator: ${READY_SIGNER_NAME:-UNSIGNED}"
