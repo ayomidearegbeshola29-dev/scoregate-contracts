@@ -36,6 +36,146 @@ run() {
 
 log() { echo "==> $*"; }
 
+# invoke <function> [args...]: call a contract function (only printed in a dry run).
+invoke() {
+  run soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    "$@"
+}
+
+# view <function>: print a view call's result with one pair of surrounding double quotes removed.
+# The exit status is the call's own.
+view() {
+  local out
+  out=$(soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    "$@" 2>/dev/null) || return 1
+  out="${out#\"}"
+  out="${out%\"}"
+  printf '%s\n' "$out"
+}
+
+# ── State capture and restoration ───────────────────────────────────────────
+# A scenario that changes governance settings first records them, and an EXIT trap puts them back
+# even when a step fails half way. Whatever could not be restored is reported, and the script then
+# exits non-zero.
+
+UNRESOLVED=()
+ORIGINAL_THRESHOLD=""
+THRESHOLD_CHANGED=false
+ORIGINAL_EPOCH=""
+ORIGINAL_EPOCH_OPEN=""
+NEXT_EPOCH=""
+EPOCH_REOPEN_PENDING=false
+
+# capture_threshold: remember the service threshold, or stop before changing anything.
+capture_threshold() {
+  if [ "$DRY_RUN" = true ]; then
+    ORIGINAL_THRESHOLD="<original threshold>"
+    echo "[dry-run] soroban contract invoke --id $CONTRACT_ID -- get_service_threshold  # remembered for restoration"
+    return 0
+  fi
+  if ! ORIGINAL_THRESHOLD=$(view get_service_threshold) || ! [[ "$ORIGINAL_THRESHOLD" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: could not read the current service threshold; nothing was changed." >&2
+    exit 1
+  fi
+  log "Original service threshold: $ORIGINAL_THRESHOLD"
+}
+
+# restore_threshold: set the remembered threshold back and verify it.
+restore_threshold() {
+  local current
+  THRESHOLD_CHANGED=false
+  if ! invoke set_service_threshold --admin-signers "[$ADMIN_ADDRESS]" --threshold "$ORIGINAL_THRESHOLD"; then
+    UNRESOLVED+=("service threshold: restoring $ORIGINAL_THRESHOLD failed; check get_service_threshold")
+    return 0
+  fi
+  if [ "$DRY_RUN" = false ]; then
+    current=$(view get_service_threshold) || current="<unreadable>"
+    if [ "$current" != "$ORIGINAL_THRESHOLD" ]; then
+      UNRESOLVED+=("service threshold: expected $ORIGINAL_THRESHOLD after the restore, found $current")
+      return 0
+    fi
+    log "Service threshold restored and verified: $current"
+  fi
+}
+
+# capture_epoch: remember the current epoch and whether it is open, or stop before changing anything.
+capture_epoch() {
+  if [ "$DRY_RUN" = true ]; then
+    ORIGINAL_EPOCH="<current epoch>"
+    ORIGINAL_EPOCH_OPEN="true"
+    NEXT_EPOCH="<current epoch + 1>"
+    echo "[dry-run] soroban contract invoke --id $CONTRACT_ID -- get_current_epoch / is_epoch_open  # remembered"
+    return 0
+  fi
+  if ! ORIGINAL_EPOCH=$(view get_current_epoch) || ! [[ "$ORIGINAL_EPOCH" =~ ^[0-9]+$ ]] \
+    || ! ORIGINAL_EPOCH_OPEN=$(view is_epoch_open) \
+    || { [ "$ORIGINAL_EPOCH_OPEN" != true ] && [ "$ORIGINAL_EPOCH_OPEN" != false ]; }; then
+    echo "ERROR: could not read the current epoch state; nothing was changed." >&2
+    exit 1
+  fi
+  NEXT_EPOCH=$((ORIGINAL_EPOCH + 1))
+  log "Current epoch: $ORIGINAL_EPOCH (open: $ORIGINAL_EPOCH_OPEN)"
+}
+
+# reopen_epoch: open the epoch after the one that was closed, and verify it. If the close never
+# took effect (the original epoch is still open) there is nothing to undo.
+reopen_epoch() {
+  local epoch open
+  EPOCH_REOPEN_PENDING=false
+  if [ "$DRY_RUN" = false ]; then
+    epoch=$(view get_current_epoch) || epoch="<unreadable>"
+    open=$(view is_epoch_open) || open="<unreadable>"
+    if [ "$epoch" = "$ORIGINAL_EPOCH" ] && [ "$open" = true ]; then
+      log "Epoch $ORIGINAL_EPOCH is still open; nothing to reopen"
+      return 0
+    fi
+  fi
+  if ! invoke open_epoch --admin-signers "[$ADMIN_ADDRESS]" --epoch-id "$NEXT_EPOCH"; then
+    UNRESOLVED+=("epoch: $ORIGINAL_EPOCH was closed and opening epoch $NEXT_EPOCH failed; submissions stay blocked until open_epoch succeeds")
+    return 0
+  fi
+  if [ "$DRY_RUN" = false ]; then
+    epoch=$(view get_current_epoch) || epoch="<unreadable>"
+    open=$(view is_epoch_open) || open="<unreadable>"
+    if [ "$epoch" != "$NEXT_EPOCH" ] || [ "$open" != true ]; then
+      UNRESOLVED+=("epoch: expected epoch $NEXT_EPOCH open, found epoch $epoch (open: $open)")
+      return 0
+    fi
+    log "Epoch $NEXT_EPOCH is open and verified"
+  fi
+}
+
+# restore_state: runs when the script exits for any reason, including a failed step.
+restore_state() {
+  local status=$?
+  trap - EXIT
+  set +e
+  if [ "$THRESHOLD_CHANGED" = true ]; then
+    log "Cleanup: restoring the service threshold"
+    restore_threshold
+  fi
+  if [ "$EPOCH_REOPEN_PENDING" = true ]; then
+    log "Cleanup: reopening the epoch"
+    reopen_epoch
+  fi
+  if [ "${#UNRESOLVED[@]}" -gt 0 ]; then
+    echo "" >&2
+    echo "UNRESOLVED STATE - these settings were NOT restored and need manual attention:" >&2
+    printf '  - %s\n' "${UNRESOLVED[@]}" >&2
+    [ "$status" -eq 0 ] && status=1
+  fi
+  exit "$status"
+}
+trap restore_state EXIT
+
 echo ""
 echo "  ╔══════════════════════════════════════════════════╗"
 echo "  ║  Failure Injection: $SCENARIO"
@@ -52,15 +192,11 @@ case "$SCENARIO" in
     log "3. Verifying submission is rejected with InsufficientSigners"
     log "4. Restoring threshold and verifying recovery"
 
+    capture_threshold
+
     log "Setting threshold to 5 (simulating 4 signers lost)"
-    run soroban contract invoke \
-      --id "$CONTRACT_ID" \
-      --source "$ADMIN_IDENTITY" \
-      --network "$NETWORK" \
-      -- \
-      set_service_threshold \
-      --admin-signers "[$ADMIN_ADDRESS]" \
-      --threshold 5
+    THRESHOLD_CHANGED=true
+    invoke set_service_threshold --admin-signers "[$ADMIN_ADDRESS]" --threshold 5
 
     log "Attempting submission with threshold not met"
     run soroban contract invoke \
@@ -80,15 +216,8 @@ case "$SCENARIO" in
       --model-version 1 \
       --attestation-input null 2>&1 || true
 
-    log "Restoring original threshold"
-    run soroban contract invoke \
-      --id "$CONTRACT_ID" \
-      --source "$ADMIN_IDENTITY" \
-      --network "$NETWORK" \
-      -- \
-      set_service_threshold \
-      --admin-signers "[$ADMIN_ADDRESS]" \
-      --threshold 1
+    log "Restoring original threshold ($ORIGINAL_THRESHOLD)"
+    restore_threshold
 
     log "Scenario complete: partial-signer-loss"
     ;;
@@ -97,17 +226,25 @@ case "$SCENARIO" in
     log "Scenario: Stale data (expired epoch)"
     log "1. Closing the current epoch to block submissions"
     log "2. Attempting score submission (should be rejected)"
-    log "3. Opening a new epoch"
+    log "3. Opening the next epoch"
     log "4. Verifying submissions resume"
+    log "An epoch that is already closed is left as it is; closing a live epoch is only done on an"
+    log "isolated deployment (FAILURE_INJECTION_ISOLATED=1), because open_epoch accepts only an ID"
+    log "above the current one, so the live epoch cannot be restored, only followed by the next."
 
-    log "Closing current epoch"
-    run soroban contract invoke \
-      --id "$CONTRACT_ID" \
-      --source "$ADMIN_IDENTITY" \
-      --network "$NETWORK" \
-      -- \
-      close_epoch \
-      --admin-signers "[$ADMIN_ADDRESS]"
+    capture_epoch
+    if [ "$ORIGINAL_EPOCH_OPEN" = true ]; then
+      if [ "$DRY_RUN" = false ] && [ "${FAILURE_INJECTION_ISOLATED:-}" != "1" ]; then
+        echo "ERROR: epoch $ORIGINAL_EPOCH is open. Closing it and reopening can only leave epoch $NEXT_EPOCH open, so the live epoch would be replaced." >&2
+        echo "       Run this scenario against an isolated deployment and set FAILURE_INJECTION_ISOLATED=1. Nothing was changed." >&2
+        exit 1
+      fi
+      log "Closing current epoch $ORIGINAL_EPOCH"
+      EPOCH_REOPEN_PENDING=true
+      invoke close_epoch --admin-signers "[$ADMIN_ADDRESS]"
+    else
+      log "Epoch $ORIGINAL_EPOCH is already closed; leaving it unchanged"
+    fi
 
     log "Attempting submission with closed epoch"
     run soroban contract invoke \
@@ -127,15 +264,10 @@ case "$SCENARIO" in
       --model-version 1 \
       --attestation-input null 2>&1 || true
 
-    log "Opening new epoch"
-    run soroban contract invoke \
-      --id "$CONTRACT_ID" \
-      --source "$ADMIN_IDENTITY" \
-      --network "$NETWORK" \
-      -- \
-      open_epoch \
-      --admin-signers "[$ADMIN_ADDRESS]" \
-      --epoch-id 2
+    if [ "$ORIGINAL_EPOCH_OPEN" = true ]; then
+      log "Opening epoch $NEXT_EPOCH"
+      reopen_epoch
+    fi
 
     log "Scenario complete: stale-data"
     ;;
