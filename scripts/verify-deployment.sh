@@ -47,6 +47,32 @@ check() {
   fi
 }
 
+# fail_check <label> <detail>: record a failed check with the reason.
+fail_check() {
+  log "  FAIL: $1 ($2)"
+  FAIL=$((FAIL + 1))
+}
+
+# read_value <function> [args...]: call a contract view function, keeping its exit status apart
+# from its output. Sets READ_OK (true only when the call succeeded) and READ_VALUE (stdout with one
+# pair of surrounding double quotes removed). A failed call never yields a value.
+read_value() {
+  local out
+  if out=$(soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    "$@" 2>/dev/null); then
+    READ_OK=true
+    READ_VALUE="${out#\"}"
+    READ_VALUE="${READ_VALUE%\"}"
+  else
+    READ_OK=false
+    READ_VALUE=""
+  fi
+}
+
 log "Verifying deployment on $NETWORK (contract=$CONTRACT_ID)"
 log "Admin: $ADMIN_ADDRESS"
 echo ""
@@ -86,17 +112,18 @@ VERSION=$(soroban contract invoke \
   get_version 2>/dev/null || echo "0")
 check "get_version returns non-zero" "$VERSION"
 
-IS_PAUSED=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  is_paused 2>/dev/null || echo "1")
-if [ "$IS_PAUSED" = "0" ]; then
+# is_paused returns a boolean. An unreadable or malformed pause state is a failure; only a
+# readable true is a (non-critical) warning.
+read_value is_paused
+if [ "$READ_OK" != true ]; then
+  fail_check "Contract pause state is readable" "is_paused call failed"
+elif [ "$READ_VALUE" = "false" ]; then
   check "Contract is not paused" "true"
-else
+elif [ "$READ_VALUE" = "true" ]; then
   WARN=$((WARN + 1))
-  log "  WARN: Contract is paused (is_paused=$IS_PAUSED)"
+  log "  WARN: Contract is paused (is_paused=true)"
+else
+  fail_check "Contract pause state is readable" "is_paused returned '$READ_VALUE', expected true or false"
 fi
 
 FINALITY_BUFFER=$(soroban contract invoke \
