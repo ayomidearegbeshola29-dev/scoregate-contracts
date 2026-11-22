@@ -15,6 +15,9 @@
 # Usage:
 #   ./scripts/rehearsal.sh [--dry-run]
 #
+# With --dry-run nothing is executed: no soroban, cargo or network call is made, the commands
+# are printed, and every check is reported as DRY_RUN instead of PASS or FAIL.
+#
 # Prerequisites:
 #   - soroban CLI configured with testnet access
 #   - Rust toolchain (wasm32-unknown-unknown target)
@@ -26,7 +29,7 @@ DRY_RUN=false
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "Usage: $0 [--dry-run]"; exit 1 ;;
   esac
 done
@@ -47,10 +50,21 @@ RECONCILIATION_REPORT="/tmp/rehearsal-reconciliation-${TIMESTAMP}.json"
 
 PASS=0
 FAIL=0
+DRY_RUN_CHECKS=0
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
-pass() { echo "  ✅ $1"; PASS=$((PASS + 1)); }
 fail() { echo "  ❌ $1"; FAIL=$((FAIL + 1)); }
+
+# A dry run executes nothing, so nothing can pass: the check is recorded as DRY_RUN instead.
+pass() {
+  if [ "$DRY_RUN" = true ]; then
+    echo "  ⏭ DRY_RUN (not executed): $1"
+    DRY_RUN_CHECKS=$((DRY_RUN_CHECKS + 1))
+  else
+    echo "  ✅ $1"
+    PASS=$((PASS + 1))
+  fi
+}
 
 run() {
   if [ "$DRY_RUN" = true ]; then
@@ -162,9 +176,13 @@ pass "Contract initialized"
 # ── Step 3: Submit sample scores ─────────────────────────────────────────────
 
 log "Submitting sample scores..."
-WALLET_1="$(soroban keys address "$ADMIN_IDENTITY")"
+if [ "$DRY_RUN" = true ]; then
+  WALLET_1="$ADMIN_ADDRESS"
+else
+  WALLET_1="$(soroban keys address "$ADMIN_IDENTITY")"
+fi
 # We just use the admin as a sample wallet for rehearsal
-WALLET_2="$(soroban keys address "$ADMIN_IDENTITY")"
+WALLET_2="$WALLET_1"
 
 run soroban contract invoke \
   --id "$CONTRACT_ID" \
@@ -188,48 +206,61 @@ pass "Submitted sample scores"
 # ── Step 4: Take pre-incident snapshot ───────────────────────────────────────
 
 log "Taking pre-incident state snapshot..."
-run soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_version > /dev/null 2>&1
+if [ "$DRY_RUN" = true ]; then
+  run soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    get_version
+else
+  soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    get_version > /dev/null 2>&1
+fi
 pass "Query endpoints responsive"
 
 take_snapshot "$SNAPSHOT_PRE" "Pre-incident"
 
 log "Checking compute_state_checksum is accessible..."
-run soroban contract invoke \
+expect_output "true" "checksum interface supported" "checksum interface NOT supported" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
   supports_interface \
-  --capability '"checksum"' 2>/dev/null | rg -q "true" && pass "checksum interface supported" || fail "checksum interface NOT supported"
+  --capability '"checksum"'
 
 # ── Step 5: Freeze contract ──────────────────────────────────────────────────
 
 log "Testing freeze_contract..."
-run soroban contract invoke \
+expect_success "freeze_contract succeeded" "freeze_contract failed" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
   freeze_contract \
-  --admin_signants '["'"$ADMIN_ADDRESS"'"]' 2>/dev/null && pass "freeze_contract succeeded" || fail "freeze_contract failed"
+  --admin_signants '["'"$ADMIN_ADDRESS"'"]'
 
 # Verify frozen
 log "Verifying is_frozen..."
-run soroban contract invoke \
+expect_output "true" "Contract is frozen" "Contract is NOT frozen" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
-  is_frozen 2>/dev/null | rg -q "true" && pass "Contract is frozen" || fail "Contract is NOT frozen"
+  is_frozen
 
 # Verify submit_score is rejected when frozen
 log "Verifying submit_score blocked during freeze..."
-run soroban contract invoke \
+expect_failure "submit_score correctly blocked" "submit_score was NOT blocked by freeze" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -244,25 +275,27 @@ run soroban contract invoke \
   --timestamp 2 \
   --confidence 85 \
   --model_version 1 \
-  --attestation_input '~None' 2>/dev/null && fail "submit_score was NOT blocked by freeze" || pass "submit_score correctly blocked"
+  --attestation_input '~None'
 
 # ── Step 6: Unfreeze ─────────────────────────────────────────────────────────
 
 log "Testing unfreeze_contract..."
-run soroban contract invoke \
+expect_success "unfreeze_contract succeeded" "unfreeze_contract failed" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
   unfreeze_contract \
-  --admin_signants '["'"$ADMIN_ADDRESS"'"]' 2>/dev/null && pass "unfreeze_contract succeeded" || fail "unfreeze_contract failed"
+  --admin_signants '["'"$ADMIN_ADDRESS"'"]'
 
-run soroban contract invoke \
+expect_output "false" "Contract is unfrozen" "Contract is still frozen" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
-  is_frozen 2>/dev/null | rg -q "false" && pass "Contract is unfrozen" || fail "Contract is still frozen"
+  is_frozen
 
 # ── Step 6b: Post-incident snapshot and reconciliation ───────────────────────
 
@@ -275,51 +308,69 @@ reconcile_snapshots
 # ── Step 7: Verify export endpoints ──────────────────────────────────────────
 
 log "Checking export interfaces..."
-run soroban contract invoke \
+expect_output "true" "export_score interface supported" "export_score interface NOT supported" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
   supports_interface \
-  --capability '"export_score"' 2>/dev/null | rg -q "true" && pass "export_score interface supported" || fail "export_score interface NOT supported"
+  --capability '"export_score"'
 
-run soroban contract invoke \
+expect_output "true" "snapshot interface supported" "snapshot interface NOT supported" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
   supports_interface \
-  --capability '"snapshot"' 2>/dev/null | rg -q "true" && pass "snapshot interface supported" || fail "snapshot interface NOT supported"
+  --capability '"snapshot"'
 
-run soroban contract invoke \
+expect_output "true" "freeze interface supported" "freeze interface NOT supported" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
   supports_interface \
-  --capability '"freeze"' 2>/dev/null | rg -q "true" && pass "freeze interface supported" || fail "freeze interface NOT supported"
+  --capability '"freeze"'
 
 # ── Step 8: Version check ────────────────────────────────────────────────────
 
 log "Verifying contract version..."
-VERSION=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_version 2>/dev/null || echo "0")
-if [ "$VERSION" = "5" ]; then
+if [ "$DRY_RUN" = true ]; then
+  run soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    get_version
   pass "Contract version is 5 (post-incident reconciliation)"
 else
-  fail "Contract version is $VERSION, expected 5"
+  VERSION=$(soroban contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$ADMIN_IDENTITY" \
+    --network "$NETWORK" \
+    -- \
+    get_version 2>/dev/null || echo "0")
+  if [ "$VERSION" = "5" ]; then
+    pass "Contract version is 5 (post-incident reconciliation)"
+  else
+    fail "Contract version is $VERSION, expected 5"
+  fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
 echo "  ── Rehearsal Results ──────────────────────────────────"
-echo "  Passed: $PASS"
-echo "  Failed: $FAIL"
+if [ "$DRY_RUN" = true ]; then
+  echo "  Dry run: nothing was executed"
+  echo "  Checks not executed: $DRY_RUN_CHECKS"
+else
+  echo "  Passed: $PASS"
+  echo "  Failed: $FAIL"
+fi
 echo "  Contract: $CONTRACT_ID"
 echo "  Network:  $NETWORK"
 echo "  Snapshots:      $SNAPSHOT_PRE"
@@ -331,6 +382,8 @@ echo ""
 if [ "$FAIL" -gt 0 ]; then
   echo "❌ Some checks failed. Review the output above."
   exit 1
+elif [ "$DRY_RUN" = true ]; then
+  echo "⏭ Dry run complete: $DRY_RUN_CHECKS checks were shown but not executed."
 else
   echo "✅ All rehearsal checks passed."
 fi
