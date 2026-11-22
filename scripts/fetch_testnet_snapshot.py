@@ -156,42 +156,67 @@ def fetch_events(rpc_url, contract_id, start_ledger, limit=100,
     return events, None
 
 
-def convert_event_to_snapshot_entry(event):
-    """Convert a raw Soroban RPC event to a replay-compatible SnapshotEntry.
+def extract_string(topic_val):
+    """Return the string value of a topic element regardless of encoding."""
+    if isinstance(topic_val, str):
+        return topic_val
+    if isinstance(topic_val, dict):
+        # Soroban RPC may wrap values as {"type": "...", "value": "..."}
+        return topic_val.get("value") or topic_val.get("str") or ""
+    return ""
 
-    ScoreGate score-submission events ('scr_sub') have topics in the format:
-      topic[0]: event name symbol (e.g. 'scr_sub')
-      topic[1]: wallet address (Stellar G.../C... address string)
-      topic[2]: asset pair symbol (e.g. 'XLM_USDC')
+
+def extract_version(topic_val):
+    """Return the event schema version in a topic element as an int, or None.
+
+    The version is a u32, which the RPC JSON carries as a number, a decimal
+    string, or a dict such as {"u32": 1} or {"type": "u32", "value": 1}.
+    """
+    if isinstance(topic_val, dict):
+        topic_val = topic_val.get("u32", topic_val.get("value"))
+    if isinstance(topic_val, bool):
+        return None
+    if isinstance(topic_val, int):
+        return topic_val
+    if isinstance(topic_val, str) and topic_val.isdigit():
+        return int(topic_val)
+    return None
+
+
+def decode_score_event(event):
+    """Decode a raw Soroban RPC event into (SnapshotEntry dict, None) or (None, reason).
+
+    ScoreGate score-submission events (`score_submitted` in
+    contracts/scoregate-score/src/events.rs) have four topics:
+      topic[0]: event name symbol, 'score'
+      topic[1]: schema version (EVENT_VERSION, a u32)
+      topic[2]: wallet address (Stellar G.../C... address string)
+      topic[3]: asset pair symbol (e.g. 'XLM_USDC')
+
+    The name and version are checked before the wallet and asset pair are read,
+    so an unrelated event with the same number of topics, or a version whose
+    layout this adapter does not know, yields a skip reason instead of a record.
 
     In the Soroban RPC JSON response, topics are represented as XDR-value
     JSON objects.  Each topic element may be either a plain string (for Symbol
     and Address types the Stellar SDK serialises as strings) or a dict with a
     type key.  This adapter handles both representations so it works across
     different RPC serialisation versions.
-
-    Returns a SnapshotEntry-compatible dict (wallet, asset_pair, trades) that
-    tools/replay can deserialise directly, or None if the event does not carry
-    the expected score-submission topic structure.
     """
-    topics = event.get("topic", [])
-    if not topics or len(topics) < 3:
-        return None
+    topics = event.get("topic") or []
+    if not topics or extract_string(topics[0]) != SCORE_EVENT_NAME:
+        return None, SKIP_NOT_SCORE_EVENT
 
-    def extract_string(topic_val):
-        """Return the string value of a topic element regardless of encoding."""
-        if isinstance(topic_val, str):
-            return topic_val
-        if isinstance(topic_val, dict):
-            # Soroban RPC may wrap values as {"type": "...", "value": "..."}
-            return topic_val.get("value") or topic_val.get("str") or ""
-        return ""
+    if len(topics) < 2 or extract_version(topics[1]) not in SUPPORTED_SCORE_EVENT_VERSIONS:
+        return None, SKIP_UNSUPPORTED_VERSION
 
-    wallet = extract_string(topics[1])
-    asset_pair = extract_string(topics[2])
+    if len(topics) != SCORE_EVENT_TOPIC_COUNT:
+        return None, SKIP_MALFORMED
 
+    wallet = extract_string(topics[2])
+    asset_pair = extract_string(topics[3])
     if not wallet or not asset_pair:
-        return None
+        return None, SKIP_MALFORMED
 
     # trades is None: score events don't carry raw trade data; tools/replay
     # derives its score from the trades field (falling back to default_score
@@ -200,7 +225,18 @@ def convert_event_to_snapshot_entry(event):
         "wallet": wallet,
         "asset_pair": asset_pair,
         "trades": None,
-    }
+    }, None
+
+
+def convert_event_to_snapshot_entry(event):
+    """Convert a raw Soroban RPC event to a replay-compatible SnapshotEntry.
+
+    Returns a SnapshotEntry-compatible dict (wallet, asset_pair, trades) that
+    tools/replay can deserialise directly, or None if the event is not a
+    supported score-submission event (see decode_score_event).
+    """
+    entry, _ = decode_score_event(event)
+    return entry
 
 
 def write_snapshot_atomic(output_path, events, output_format):

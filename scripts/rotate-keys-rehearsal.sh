@@ -161,13 +161,22 @@ fi
 
 log "Deploying contract to $NETWORK..."
 if [ "$DRY_RUN" = false ]; then
-  CONTRACT_ID=$(soroban contract deploy \
+  DEPLOY_STDERR=$(mktemp)
+  if CONTRACT_ID=$(soroban contract deploy \
     --wasm "$OPT_WASM_PATH" \
     --source "$ADMIN_IDENTITY" \
-    --network "$NETWORK" 2>/dev/null || echo "DEPLOY_FAILED")
-  if [ "$CONTRACT_ID" = "DEPLOY_FAILED" ]; then
-    warn "Deployment failed — check soroban CLI config. Using placeholder."
-    CONTRACT_ID="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABTF"
+    --network "$NETWORK" 2>"$DEPLOY_STDERR") && [ -n "$CONTRACT_ID" ]; then
+    rm -f "$DEPLOY_STDERR"
+  else
+    # Stop here: initializing and rotating keys on a contract that does not exist would only
+    # add failures that hide the real one. Placeholder IDs are for --dry-run alone.
+    DEPLOY_ERROR=$(tr '\n\r' '  ' < "$DEPLOY_STDERR" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | cut -c1-500)
+    rm -f "$DEPLOY_STDERR"
+    CONTRACT_ID=""
+    fail "Deployment failed, no contract was created: ${DEPLOY_ERROR:-no error output}"
+    record_action "$(next_test_id)" "deploy" "failed" "soroban contract deploy failed: ${DEPLOY_ERROR:-no error output}"
+    write_report
+    exit 1
   fi
 else
   CONTRACT_ID="CAAAAA...REHEARSAL"
