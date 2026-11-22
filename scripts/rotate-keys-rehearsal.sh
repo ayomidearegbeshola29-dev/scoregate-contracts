@@ -101,6 +101,32 @@ ENTRY
   fi
 }
 
+# Escape text for use inside a JSON string: one line, backslashes and double quotes escaped.
+json_escape() {
+  printf '%s' "$1" | tr '\n\r\t' '   ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Run a contract call, print its pass/fail line, and record the action with its real outcome. A
+# failed call is recorded as "failed" with the command and the error it printed, so the action log
+# and the pass/fail counts always agree.
+#   run_recorded <action> <pass message> <fail message> <detail> <command...>
+run_recorded() {
+  local action="$1" pass_msg="$2" fail_msg="$3" detail="$4"
+  shift 4
+  local err_file err
+  err_file=$(mktemp)
+  if run "$@" 2>"$err_file"; then
+    pass "$pass_msg"
+    record_action "$(next_test_id)" "$action" "completed" "$detail"
+  else
+    err=$(head -c 500 "$err_file")
+    fail "$fail_msg"
+    record_action "$(next_test_id)" "$action" "failed" \
+      "$(json_escape "$detail; command: $*; error: ${err:-no error output}")"
+  fi
+  rm -f "$err_file"
+}
+
 write_report() {
   local overall_status="passed"
   [ "$FAIL" -gt 0 ] && overall_status="failed"
@@ -420,20 +446,25 @@ DUMMY_PUBKEY_2="0x$(printf 'B%.0s' {1..130})"
 
 # 5a. Set initial pubkey
 log "Setting initial service pubkey..."
-run soroban contract invoke \
+run_recorded "set_service_pubkey" "Service pubkey set" "Failed to set service pubkey" \
+  "Initial pubkey set" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
   -- \
   set_service_pubkey \
   --admin-signers "[\"$ADMIN_ADDRESS\"]" \
-  --pubkey "$DUMMY_PUBKEY_1" 2>/dev/null && pass "Service pubkey set" || fail "Failed to set service pubkey"
-record_action "$(next_test_id)" "set_service_pubkey" "completed" "Initial pubkey set"
+  --pubkey "$DUMMY_PUBKEY_1"
 
 # 5b. Rotate with overlap window
 OVERLAP_SECS=3600
 log "Rotating service pubkey with ${OVERLAP_SECS}s overlap window..."
-run soroban contract invoke \
+run_recorded "rotate_service_pubkey" \
+  "Service pubkey rotation started with ${OVERLAP_SECS}s overlap" \
+  "Failed to rotate service pubkey" \
+  "Rotated with ${OVERLAP_SECS}s overlap" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -441,8 +472,7 @@ run soroban contract invoke \
   rotate_service_pubkey \
   --admin-signers "[\"$ADMIN_ADDRESS\"]" \
   --new_key "$DUMMY_PUBKEY_2" \
-  --overlap_secs "$OVERLAP_SECS" 2>/dev/null && pass "Service pubkey rotation started with ${OVERLAP_SECS}s overlap" || fail "Failed to rotate service pubkey"
-record_action "$(next_test_id)" "rotate_service_pubkey" "completed" "Rotated with ${OVERLAP_SECS}s overlap"
+  --overlap_secs "$OVERLAP_SECS"
 
 # 5c. Verify pending pubkey exists during overlap
 log "Verifying pending pubkey..."
@@ -460,7 +490,11 @@ fi
 
 # 5d. Test instant rotation (zero overlap)
 log "Testing instant rotation (zero overlap)..."
-run soroban contract invoke \
+run_recorded "rotate_service_pubkey_instant" \
+  "Instant rotation (zero overlap) succeeded" \
+  "Instant rotation failed" \
+  "Instant rotation with 0 overlap" \
+  soroban contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -468,8 +502,7 @@ run soroban contract invoke \
   rotate_service_pubkey \
   --admin-signers "[\"$ADMIN_ADDRESS\"]" \
   --new_key "$DUMMY_PUBKEY_1" \
-  --overlap_secs 0 2>/dev/null && pass "Instant rotation (zero overlap) succeeded" || fail "Instant rotation failed"
-record_action "$(next_test_id)" "rotate_service_pubkey_instant" "completed" "Instant rotation with 0 overlap"
+  --overlap_secs 0
 
 # ── Step 6: Signer rotation with stale data simulation ───────────────────────
 

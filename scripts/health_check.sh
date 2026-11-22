@@ -57,7 +57,22 @@ else
   echo "PASS  pause state: $PAUSE_OUTPUT"
 fi
 check "schema version"   invoke get_version
-check "service liveness" invoke is_service_alive
+# Service liveness: is_service_alive returns a boolean, and a successful call that returns false
+# means the service is not alive. Only the literal true is healthy; an RPC/contract error or any
+# other output is a failure too.
+LIVE_OUTPUT=$(invoke is_service_alive 2>&1) && LIVE_RC=0 || LIVE_RC=$?
+if [[ "$LIVE_RC" -ne 0 ]]; then
+  echo "FAIL  service liveness: $LIVE_OUTPUT"
+  FAILURES=$((FAILURES + 1))
+elif [[ "$LIVE_OUTPUT" == "true" ]]; then
+  echo "PASS  service liveness: $LIVE_OUTPUT"
+elif [[ "$LIVE_OUTPUT" == "false" ]]; then
+  echo "FAIL  service liveness: service is NOT alive"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "FAIL  service liveness: unexpected output: $LIVE_OUTPUT"
+  FAILURES=$((FAILURES + 1))
+fi
 
 # A pending upgrade proposal is optional state: its absence (Error::NoPendingUpgrade,
 # discriminant #13) is healthy, not a failure — only a genuine RPC/contract error is.
