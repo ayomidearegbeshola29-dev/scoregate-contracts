@@ -73,6 +73,23 @@ read_value() {
   fi
 }
 
+# check_number_in_range <label> <function> <min> <max>: pass only when the call succeeds and returns
+# an unsigned integer within [min, max]. A failed call, malformed output or an out-of-domain value
+# fails; nothing is substituted for a failed read.
+check_number_in_range() {
+  local label="$1" fn="$2" min="$3" max="$4"
+  read_value "$fn"
+  if [ "$READ_OK" != true ]; then
+    fail_check "$label" "$fn call failed"
+  elif ! [[ "$READ_VALUE" =~ ^[0-9]{1,18}$ ]]; then
+    fail_check "$label" "$fn returned '$READ_VALUE', expected an unsigned integer"
+  elif [ "$((10#$READ_VALUE))" -lt "$min" ] || [ "$((10#$READ_VALUE))" -gt "$max" ]; then
+    fail_check "$label" "$fn returned $READ_VALUE, expected $min to $max"
+  else
+    check "$label" "$READ_VALUE"
+  fi
+}
+
 log "Verifying deployment on $NETWORK (contract=$CONTRACT_ID)"
 log "Admin: $ADMIN_ADDRESS"
 echo ""
@@ -104,13 +121,8 @@ else
   check "get_service returns valid address" "FAIL"
 fi
 
-VERSION=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_version 2>/dev/null || echo "0")
-check "get_version returns non-zero" "$VERSION"
+# CONTRACT_VERSION is positive; get_version returns a u32.
+check_number_in_range "get_version returns non-zero" get_version 1 4294967295
 
 # is_paused returns a boolean. An unreadable or malformed pause state is a failure; only a
 # readable true is a (non-critical) warning.
@@ -126,29 +138,14 @@ else
   fail_check "Contract pause state is readable" "is_paused returned '$READ_VALUE', expected true or false"
 fi
 
-FINALITY_BUFFER=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_finality_buffer 2>/dev/null || echo "0")
-check "Finality buffer is configured" "$FINALITY_BUFFER"
+# 0 disables the finality buffer and is valid; the setter rejects more than 24 hours.
+check_number_in_range "Finality buffer is within its allowed range" get_finality_buffer 0 86400
 
-COOLDOWN=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_cooldown 2>/dev/null || echo "0")
-check "Cooldown is configured" "$COOLDOWN"
+# MIN_COOLDOWN_SECS..MAX_COOLDOWN_SECS (1 minute to 24 hours).
+check_number_in_range "Cooldown is configured" get_cooldown 60 86400
 
-UPGRADE_DELAY=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_upgrade_delay 2>/dev/null || echo "0")
-check "Upgrade delay is configured" "$UPGRADE_DELAY"
+# MIN_UPGRADE_DELAY_SECS..MAX_UPGRADE_DELAY_SECS (48 hours to 14 days).
+check_number_in_range "Upgrade delay is configured" get_upgrade_delay 172800 1209600
 
 echo ""
 
@@ -218,22 +215,22 @@ echo ""
 
 # ── 4. Service set check ──────────────────────────────
 log "4. Service configuration check"
-SERVICE_SET=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_service_signers 2>/dev/null || echo "NONE")
-check "Service signers are configured" "$SERVICE_SET"
+read_value get_service_signers
+if [ "$READ_OK" != true ]; then
+  fail_check "Service signers are configured" "get_service_signers call failed"
+elif [ -z "$READ_VALUE" ] || [ "$READ_VALUE" = "[]" ]; then
+  fail_check "Service signers are configured" "get_service_signers returned no signers"
+else
+  check "Service signers are configured" "$READ_VALUE"
+fi
 
-SERVICE_THRESHOLD=$(soroban contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$ADMIN_IDENTITY" \
-  --network "$NETWORK" \
-  -- \
-  get_service_threshold 2>/dev/null || echo "0")
-if [ "$SERVICE_THRESHOLD" != "0" ]; then
-  check "Service threshold is set (>0)" "$SERVICE_THRESHOLD"
+read_value get_service_threshold
+if [ "$READ_OK" != true ]; then
+  fail_check "Service threshold is set (>0)" "get_service_threshold call failed"
+elif ! [[ "$READ_VALUE" =~ ^[0-9]{1,18}$ ]]; then
+  fail_check "Service threshold is set (>0)" "get_service_threshold returned '$READ_VALUE', expected an unsigned integer"
+elif [ "$((10#$READ_VALUE))" -gt 0 ]; then
+  check "Service threshold is set (>0)" "$READ_VALUE"
 else
   WARN=$((WARN + 1))
   log "  WARN: Service threshold is 0 — single service key auth is in effect"
