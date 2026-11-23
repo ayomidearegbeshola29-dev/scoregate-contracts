@@ -68,6 +68,29 @@ These properties prove that a valid submission is *not* blocked forever. Under t
 
 25. **BoundedLivenessSubmissionAccepted** (`PROP-LIVE-3`): In every step where all three preconditions hold (no embargo, policy-compliant score, token available, last submit time < now), either the submission is accepted in that step (`last_submit_time'[w] = now`) or the state is unchanged — proving no state can indefinitely prevent an otherwise-enabled submission.
 
+### Upgrade Approval Snapshot Invariants (new — issue #413)
+
+These properties make the upgrade multisig's signer-set binding machine-checkable. The approval accumulator is only
+valid for the signer set captured when accumulation started; a signer-set change must invalidate it atomically.
+
+26. **UpgradeApprovalsWithinSnapshot** (`INV-UPG-1`): every recorded approval is a member of `upg_signer_snap`, the
+    snapshot frozen when the first approval arrived. This is the direct check for approvals collected outside the
+    captured signer set.
+
+27. **UpgradeSnapshotConsistent** (`INV-UPG-2`): `upg_signer_snap ⊆ upg_live_signers`, and the approval accumulator and
+    snapshot are empty together. A stale snapshot cannot survive a reset with no approvals.
+
+28. **UpgradeApprovalsResetAfterMutation** (`INV-UPG-3`): whenever `upg_live_signers` changes, `upg_approvals` and
+    `upg_signer_snap` are both reset to `{}`. Removing the clearing step from `MutateAdminSet` produces a TLC
+    counterexample.
+
+29. **UpgradeEmptyStateIsConsistent** (`INV-UPG-4`): the empty-state equivalence is also asserted as a box-property so
+    the initial state and stuttering steps are explicitly covered.
+
+See [`upgrade-approval-validation.md`](upgrade-approval-validation.md) for the TLC plan, the mutation trace, and the
+results of the exhaustive upgrade-slice check (`spec/check_upgrade_invariants.py`: 27 reachable states, 0 violations;
+mutation: 160 states, first counterexample `AddUpgradeApproval(S1)` → `MutateAdminSet(S1)`).
+
 ## Variables
 
 | Variable | Type | Description |
@@ -88,6 +111,9 @@ These properties prove that a valid submission is *not* blocked forever. Under t
 | `cc_revealed` | `Signer → 𝔹` | Successful-reveal flag per signer |
 | `cc_finalized` | `𝔹` | TRUE once the current consensus round has been finalized |
 | `cc_final_score` | `ℕ` | The consensus score written on finalization |
+| `upg_approvals` | `Set(Signer)` | Signers whose upgrade approval has been collected |
+| `upg_signer_snap` | `Set(Signer)` | Admin signer set frozen when the first approval arrived |
+| `upg_live_signers` | `Set(Signer)` | Current live admin signer set (mutated by admin actions) |
 
 ## Actions
 
@@ -113,6 +139,14 @@ These properties prove that a valid submission is *not* blocked forever. Under t
 | `FinalizeConsensus` | Atomically finalizes the round when K-of-N epsilon agreement holds |
 | `ResetConsensusRound` | Resets all consensus state to begin a new round |
 | `ExpireStaleCommit(s)` | Models Soroban TTL eviction: clears an expired uncommitted commit |
+
+### Upgrade Approval Actions (new — issue #413)
+
+| Action | Description |
+|---|---|
+| `AddUpgradeApproval(s)` | A live signer approves the pending upgrade; re-snapshots and restarts accumulation if the live set diverged from the frozen snapshot |
+| `MutateAdminSet(s)` | Admin adds/removes a signer and atomically invalidates all accumulated approvals and the snapshot |
+| `ClearUpgradeApprovals` | Explicit accumulator/snapshot reset (veto or threshold met) |
 
 ## Model-Check Results
 

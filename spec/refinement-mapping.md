@@ -146,6 +146,9 @@ storage — matching the spec's `REVEAL_WINDOW` eviction model.
 | `FinalizeConsensus` | `submit_consensus_score(...)` (finalization step inside `reveal_consensus` for the commit-reveal path) | `service.require_auth()` or M-of-N | Triggered once `Cardinality(agreeing_reveals) ≥ CONSENSUS_K`; in the commit-reveal flow the same K-of-N check runs inside `reveal_consensus`. |
 | `ResetConsensusRound` | Implicit: TTL expiry of temporary storage entries | host | A new round starts when all temporary commit/reveal entries have expired or been consumed. |
 | `ExpireStaleCommit(s)` | Implicit: Soroban temporary-storage TTL eviction | host | When the TTL elapses the entry is silently removed; a subsequent `reveal_consensus` call finds no commit and returns `RevealWindowExpired`. |
+| `AddUpgradeApproval(s)` (issue #413) | `propose_upgrade(...)` approval accumulation | `Policy::UpgradeGovernance` M-of-N via `require_policy_auth` | Membership in the live admin set is checked before an address is appended to `DataKeyD::UpgradeApprovals`; the accumulator is cleared when the threshold is met. |
+| `MutateAdminSet(s)` (issue #413) | `add_admin_signer(...)` / `remove_admin_signer(...)` | `Policy::SignerAdmin` M-of-N | Both update `DataKey::AdminSet` and immediately call `clear_upgrade_approvals()`, so approvals cannot survive a signer-set change. |
+| `ClearUpgradeApprovals` (issue #413) | `clear_upgrade_approvals()` via veto, execution or signer mutation | entry-point policy | Explicit accumulator reset. |
 
 ---
 
@@ -172,6 +175,10 @@ counterpart, tested in the `contracts/scoregate-score/src/` test modules.
 | `ExpiredCommitCannotReveal` (`INV-CR-6`) | Temporary-storage key absent after TTL → `has()` returns false → reveal rejected | `test_consensus.rs` |
 | `SubmitEnabledWhenConditionsMet` (`INV-LIVE-1`) ⚠️ | Precondition structure of `submit_score`: token check + floor check + embargo check together are sufficient | `test_rate_limit.rs`, `test_score_floor.rs`, `test_embargo.rs` |
 | `ScoreFloorDoesNotBlockAllScores` (`INV-LIVE-2`) ⚠️ | `DEFAULT_SCORE_FLOOR_MIN = 20 < MAX_SCORE = 100`; always an admissible value | `test_score_floor.rs` |
+| `UpgradeApprovalsWithinSnapshot` (`INV-UPG-1`) | `propose_upgrade()`: `require_policy_auth` verifies signer membership before appending to `DataKeyD::UpgradeApprovals` | `test_upgrade_multisig.rs` |
+| `UpgradeSnapshotConsistent` (`INV-UPG-2`) | `add_admin_signer` / `remove_admin_signer` clear approvals after any admin-set change; veto/execute clear them too | `test_upgrade_multisig.rs`, `test_admin_multisig.rs` |
+| `UpgradeApprovalsResetAfterMutation` (`INV-UPG-3`) | Same Rust clearing calls; the TLA+ snapshot is an abstraction of "approvals only valid for the set captured at accumulation start" | `test_upgrade_multisig.rs`, `test_admin_multisig.rs` |
+| `UpgradeEmptyStateIsConsistent` (`INV-UPG-4`) | `get_upgrade_approval_count()` reads empty storage as 0; `clear_upgrade_approvals()` removes the key entirely | `test_upgrade_multisig.rs` |
 
 > ⚠️ `INV-LIVE-1` / `INV-LIVE-2` are liveness claims catalogued in
 > [`spec/README.md`](README.md) but are **not** model-checked by TLC: they are
@@ -246,6 +253,8 @@ When the Rust implementation changes:
 - `spec/ScoreGate.tla` — The abstract TLA+ specification
 - `spec/ScoreGate.cfg` — TLC model-checking configuration
 - `spec/README.md` — Invariant catalogue and TLC run instructions
+- `spec/upgrade-approval-validation.md` — Upgrade approval properties, mutation trace and exhaustive slice results (issue #413)
+- `spec/check_upgrade_invariants.py` — Exhaustive checker for the upgrade variable slice
 - `contracts/scoregate-score/src/types.rs` — `DataKey`, `DataKeyB`, `DataKeyC`, `DataKeyD` enum definitions (all storage keys)
 - `contracts/scoregate-score/src/storage.rs` — Storage read/write helpers (concrete implementations of abstract `score`, `hwm`, `tb_tokens`, etc.)
 - `contracts/scoregate-score/src/constants.rs` — All numeric constants referenced in §3

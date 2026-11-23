@@ -875,6 +875,43 @@ VetoIsPermanent ==
             /\ gov_proposal_id' /= gov_proposal_id
             /\ gov_vetoed'    = FALSE)]_vars
 
+\* ── Upgrade approval snapshot invariants (issue #413) ───────────────────────
+\* The upgrade approval accumulator is only meaningful relative to the signer
+\* set that was live when accumulation started.  upg_signer_snap records that
+\* set; upg_live_signers models the current admin set.  AddUpgradeApproval
+\* re-snapshots when the two diverge, and MutateAdminSet / ClearUpgradeApprovals
+\* reset both accumulator and snapshot.  The properties below make that
+\* signer-set binding machine-checkable instead of merely explored.
+
+\* INV-UPG-1  Every approval was cast by a member of the captured snapshot.
+\* This is the direct counterexample target for "approvals outside the
+\* captured signer set" — an approval from a signer added after accumulation
+\* began must never count toward the old snapshot.
+UpgradeApprovalsWithinSnapshot ==
+    \A s \in upg_approvals : s \in upg_signer_snap
+
+\* INV-UPG-2  The captured snapshot never contains a signer that is no longer
+\* live.  Combined with INV-UPG-1 this pins every valid approval to the
+\* current signer set.  The empty-state clause is stated explicitly so a
+\* stale snapshot cannot survive a reset with no approvals.
+UpgradeSnapshotConsistent ==
+    /\ upg_signer_snap \subseteq upg_live_signers
+    /\ (upg_approvals = {} <=> upg_signer_snap = {})
+
+\* INV-UPG-3  Changing the live signer set atomically invalidates the whole
+\* accumulator.  Written as a temporal property so that removing the clearing
+\* step from MutateAdminSet produces a TLC counterexample trace.
+UpgradeApprovalsResetAfterMutation ==
+    [][upg_live_signers' /= upg_live_signers =>
+          /\ upg_approvals'   = {}
+          /\ upg_signer_snap' = {}]_vars
+
+\* INV-UPG-4  An empty accumulator is also explicitly reflected in the
+\* snapshot (restated as a box-property so the initial state and every
+\* stuttering step are covered by TLC's property engine).
+UpgradeEmptyStateIsConsistent ==
+    [][upg_approvals = {} <=> upg_signer_snap = {}]_vars
+
 \* ── State constraint (model-checking bound) ──────────────────────────────────
 \* now <= 6 covers: 2 full refill cycles, 1 full commit-reveal-finalize-reset
 \* cycle, and the full governance lifecycle (propose at 1, executable at 3,
